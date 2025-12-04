@@ -1,0 +1,370 @@
+﻿using System.Net.WebSockets;
+using System.Text;
+using DerivCTrader.Infrastructure.CTrader.Interfaces;
+using DerivCTrader.Infrastructure.CTrader.Models;
+using Google.Protobuf;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
+
+namespace DerivCTrader.Infrastructure.CTrader;
+
+/// <summary>
+///
+/// </summary>
+public class CTraderClient : ICTraderClient, IDisposable
+{
+    private readonly ILogger<CTraderClient> _logger;
+    private readonly IConfiguration _configuration;
+    private readonly ClientWebSocket _webSocket;
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
+    private readonly Dictionary<int, TaskCompletionSource<byte[]>> _pendingResponses = new();
+    private CancellationTokenSource? _receiveCts;
+    private Task? _receiveTask;
+    
+    private string _clientId = string.Empty;
+    private string _clientSecret = string.Empty;
+    private string _accessToken = string.Empty;
+    private string _refreshToken = string.Empty;
+    private long _accountId;
+    private string _webSocketUrl = string.Empty;
+    private int _heartbeatInterval;
+
+    public bool IsConnected => _webSocket.State == WebSocketState.Open;
+    public bool IsApplicationAuthenticated { get; private set; }
+    public bool IsAccountAuthenticated { get; private set; }
+
+    public event EventHandler<bool>? ConnectionStateChanged;
+    public event EventHandler<CTraderMessage>? MessageReceived;
+
+    public CTraderClient(ILogger<CTraderClient> logger, IConfiguration configuration)
+    {
+        _logger = logger;
+        _configuration = configuration;
+        _webSocket = new ClientWebSocket();
+        
+        LoadConfiguration();
+    }
+
+    private void LoadConfiguration()
+    {
+        var ctraderSection = _configuration.GetSection("CTrader");
+        _clientId = ctraderSection["ClientId"] ?? throw new InvalidOperationException("CTrader:ClientId is required");
+        _clientSecret = ctraderSection["ClientSecret"] ?? throw new InvalidOperationException("CTrader:ClientSecret is required");
+        _accessToken = ctraderSection["AccessToken"] ?? throw new InvalidOperationException("CTrader:AccessToken is required");
+        _refreshToken = ctraderSection["RefreshToken"] ?? string.Empty;
+        
+        var environment = ctraderSection["Environment"] ?? "Demo";
+        var accountIdKey = environment == "Live" ? "LiveAccountId" : "DemoAccountId";
+        _accountId = long.Parse(ctraderSection[accountIdKey] ?? throw new InvalidOperationException($"CTrader:{accountIdKey} is required"));
+        
+        _webSocketUrl = ctraderSection["WebSocketUrl"] ?? "wss://demo.ctraderapi.com";
+        _heartbeatInterval = int.Parse(ctraderSection["HeartbeatIntervalSeconds"] ?? "25");
+
+        _logger.LogInformation("CTrader configuration loaded: Environment={Environment}, AccountId={AccountId}", 
+            environment, _accountId);
+    }
+
+    public async Task ConnectAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            _logger.LogInformation("=== CTRADER: Connecting to {Url} ===", _webSocketUrl);
+            Console.WriteLine($"=== CTRADER: Connecting to {_webSocketUrl} ===");
+
+            await _webSocket.ConnectAsync(new Uri(_webSocketUrl), cancellationToken);
+
+            _logger.LogInformation("=== CTRADER: ✅ Connected ===");
+            Console.WriteLine("=== CTRADER: ✅ Connected ===");
+
+            // Start receive loop
+            _receiveCts = new CancellationTokenSource();
+            _receiveTask = Task.Run(() => ReceiveLoopAsync(_receiveCts.Token), _receiveCts.Token);
+
+            ConnectionStateChanged?.Invoke(this, true);
+
+            // Start heartbeat
+            _ = Task.Run(() => HeartbeatLoopAsync(_receiveCts.Token), _receiveCts.Token);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to connect to cTrader");
+            Console.WriteLine($"=== CTRADER: ❌ Connection failed: {ex.Message} ===");
+            throw;
+        }
+    }
+
+    public async Task DisconnectAsync()
+    {
+        try
+        {
+            _receiveCts?.Cancel();
+            
+            if (_webSocket.State == WebSocketState.Open)
+            {
+                await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Client disconnect", CancellationToken.None);
+            }
+
+            IsApplicationAuthenticated = false;
+            IsAccountAuthenticated = false;
+            ConnectionStateChanged?.Invoke(this, false);
+
+            _logger.LogInformation("Disconnected from cTrader");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during disconnect");
+        }
+    }
+
+    public async Task AuthenticateApplicationAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            _logger.LogInformation("=== CTRADER: Authenticating application ===");
+            Console.WriteLine("=== CTRADER: Authenticating application ===");
+
+            var authReq = new ProtoOAApplicationAuthReq
+            {
+                ClientId = _clientId,
+                ClientSecret = _clientSecret
+            };
+
+            await SendMessageAsync(authReq, (int)ProtoOAPayloadType.ProtoOaApplicationAuthReq, cancellationToken);
+            
+            // Wait for response
+            var response = await WaitForResponseAsync<ProtoOAApplicationAuthRes>(
+                (int)ProtoOAPayloadType.ProtoOaApplicationAuthRes,
+                TimeSpan.FromSeconds(10),
+                cancellationToken);
+
+            if (response != null)
+            {
+                IsApplicationAuthenticated = true;
+                _logger.LogInformation("=== CTRADER: ✅ Application authenticated ===");
+                Console.WriteLine("=== CTRADER: ✅ Application authenticated ===");
+            }
+            else
+            {
+                throw new Exception("Application authentication failed - no response");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Application authentication failed");
+            Console.WriteLine($"=== CTRADER: ❌ Application authentication failed: {ex.Message} ===");
+            throw;
+        }
+    }
+
+    public async Task AuthenticateAccountAsync(long accountId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            _logger.LogInformation("=== CTRADER: Authenticating account {AccountId} ===", accountId);
+            Console.WriteLine($"=== CTRADER: Authenticating account {accountId} ===");
+
+            var authReq = new ProtoOAAccountAuthReq
+            {
+                CtidTraderAccountId = accountId,
+                AccessToken = _accessToken
+            };
+
+            await SendMessageAsync(authReq, (int)ProtoOAPayloadType.ProtoOaAccountAuthReq, cancellationToken);
+
+            // Wait for response
+            var response = await WaitForResponseAsync<ProtoOAAccountAuthRes>(
+                (int)ProtoOAPayloadType.ProtoOaAccountAuthRes,
+                TimeSpan.FromSeconds(10),
+                cancellationToken);
+
+            if (response != null)
+            {
+                IsAccountAuthenticated = true;
+                _logger.LogInformation("=== CTRADER: ✅ Account {AccountId} authenticated ===", accountId);
+                Console.WriteLine($"=== CTRADER: ✅ Account {accountId} authenticated ===");
+            }
+            else
+            {
+                throw new Exception("Account authentication failed - no response");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Account authentication failed");
+            Console.WriteLine($"=== CTRADER: ❌ Account authentication failed: {ex.Message} ===");
+            throw;
+        }
+    }
+
+    public async Task SendMessageAsync<T>(T message, int payloadType, CancellationToken cancellationToken = default)
+    {
+        await _sendLock.WaitAsync(cancellationToken);
+        try
+        {
+            byte[] payload;
+            
+            if (message is IMessage protoMessage)
+            {
+                payload = protoMessage.ToByteArray();
+            }
+            else
+            {
+                var json = JsonConvert.SerializeObject(message);
+                payload = Encoding.UTF8.GetBytes(json);
+            }
+
+            var messageBytes = new byte[sizeof(int) + payload.Length];
+            BitConverter.GetBytes(payloadType).CopyTo(messageBytes, 0);
+            payload.CopyTo(messageBytes, sizeof(int));
+
+            await _webSocket.SendAsync(
+                new ArraySegment<byte>(messageBytes),
+                WebSocketMessageType.Binary,
+                true,
+                cancellationToken);
+
+            _logger.LogDebug("Sent message: PayloadType={PayloadType}, Size={Size}", payloadType, messageBytes.Length);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+    }
+
+    public async Task<T?> WaitForResponseAsync<T>(int payloadType, TimeSpan timeout, CancellationToken cancellationToken = default)
+    {
+        var tcs = new TaskCompletionSource<byte[]>();
+        _pendingResponses[payloadType] = tcs;
+
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(timeout);
+
+            var payload = await tcs.Task.WaitAsync(cts.Token);
+            
+            // Deserialize based on type
+            if (typeof(T).GetInterfaces().Contains(typeof(IMessage)))
+            {
+                var parser = typeof(T).GetProperty("Parser")?.GetValue(null) as MessageParser;
+                return (T?)parser?.ParseFrom(payload);
+            }
+            else
+            {
+                var json = Encoding.UTF8.GetString(payload);
+                return JsonConvert.DeserializeObject<T>(json);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("Timeout waiting for response: PayloadType={PayloadType}", payloadType);
+            return default;
+        }
+        finally
+        {
+            _pendingResponses.Remove(payloadType);
+        }
+    }
+
+    private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
+    {
+        var buffer = new byte[8192];
+
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested && _webSocket.State == WebSocketState.Open)
+            {
+                var result = await _webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+
+                if (result.MessageType == WebSocketMessageType.Binary)
+                {
+                    await ProcessMessageAsync(buffer, result.Count);
+                }
+                else if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    _logger.LogWarning("WebSocket closed by server");
+                    await DisconnectAsync();
+                    break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogError(ex, "Error in receive loop");
+            }
+        }
+    }
+
+    private async Task ProcessMessageAsync(byte[] buffer, int length)
+    {
+        try
+        {
+            // Extract payload type (first 4 bytes)
+            var payloadType = BitConverter.ToInt32(buffer, 0);
+
+            // Extract payload (remaining bytes)
+            var payload = new byte[length - sizeof(int)];
+            Array.Copy(buffer, sizeof(int), payload, 0, payload.Length);
+
+            _logger.LogDebug("Received message: PayloadType={PayloadType}, Size={Size}", payloadType, length);
+
+            // Check if someone is waiting for this response
+            if (_pendingResponses.TryGetValue(payloadType, out var tcs))
+            {
+                tcs.TrySetResult(payload);
+            }
+
+            // Fire event for message received
+            var message = new CTraderMessage
+            {
+                PayloadType = payloadType,
+                Payload = payload,
+                ReceivedAt = DateTime.UtcNow
+            };
+
+            MessageReceived?.Invoke(this, message);
+
+            await Task.CompletedTask;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing message");
+        }
+    }
+
+    private async Task HeartbeatLoopAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested && IsConnected)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(_heartbeatInterval), cancellationToken);
+
+                if (IsConnected)
+                {
+                    var heartbeat = new ProtoHeartbeatEvent();
+                    await SendMessageAsync(heartbeat, (int)ProtoOAPayloadType.ProtoHeartbeatEvent, cancellationToken);
+                    _logger.LogDebug("Heartbeat sent");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogError(ex, "Error in heartbeat loop");
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        _receiveCts?.Cancel();
+        _receiveCts?.Dispose();
+        _webSocket?.Dispose();
+        _sendLock?.Dispose();
+    }
+}

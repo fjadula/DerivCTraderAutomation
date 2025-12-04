@@ -1,0 +1,128 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  buildConfiguration: 'Release'
+  dotnetVersion: '8.0.x'
+
+stages:
+- stage: Build
+  displayName: 'Build and Test'
+  jobs:
+  - job: Build
+    displayName: 'Build Solution'
+    steps:
+    - task: UseDotNet@2
+      displayName: 'Install .NET SDK'
+      inputs:
+        version: $(dotnetVersion)
+        
+    - task: DotNetCoreCLI@2
+      displayName: 'Restore NuGet Packages'
+      inputs:
+        command: 'restore'
+        projects: '**/*.csproj'
+        
+    - task: DotNetCoreCLI@2
+      displayName: 'Build Solution'
+      inputs:
+        command: 'build'
+        projects: '**/*.sln'
+        arguments: '--configuration $(buildConfiguration) --no-restore'
+        
+    - task: DotNetCoreCLI@2
+      displayName: 'Run Tests'
+      inputs:
+        command: 'test'
+        projects: '**/*Tests.csproj'
+        arguments: '--configuration $(buildConfiguration) --no-build'
+      continueOnError: true
+      
+    - task: DotNetCoreCLI@2
+      displayName: 'Publish SignalScraper'
+      inputs:
+        command: 'publish'
+        publishWebProjects: false
+        projects: '**/DerivCTrader.SignalScraper.csproj'
+        arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)/SignalScraper --runtime win-x64 --self-contained true'
+        zipAfterPublish: true
+        
+    - task: DotNetCoreCLI@2
+      displayName: 'Publish TradeExecutor'
+      inputs:
+        command: 'publish'
+        publishWebProjects: false
+        projects: '**/DerivCTrader.TradeExecutor.csproj'
+        arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)/TradeExecutor --runtime win-x64 --self-contained true'
+        zipAfterPublish: true
+        
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifacts'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'drop'
+        publishLocation: 'Container'
+
+- stage: Deploy
+  displayName: 'Deploy to VPS'
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: DeployToVPS
+    displayName: 'Deploy to Windows Server VPS'
+    environment: 'Production-VPS'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: DownloadBuildArtifacts@0
+            displayName: 'Download Artifacts'
+            inputs:
+              buildType: 'current'
+              downloadType: 'single'
+              artifactName: 'drop'
+              downloadPath: '$(System.ArtifactsDirectory)'
+              
+          - task: PowerShell@2
+            displayName: 'Stop Services'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Stop-Service -Name "DerivSignalScraper" -ErrorAction SilentlyContinue
+                Stop-Service -Name "DerivTradeExecutor" -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 5
+              
+          - task: CopyFiles@2
+            displayName: 'Deploy SignalScraper'
+            inputs:
+              SourceFolder: '$(System.ArtifactsDirectory)/drop/SignalScraper'
+              Contents: '**'
+              TargetFolder: 'C:\DerivTrading\SignalScraper'
+              OverWrite: true
+              
+          - task: CopyFiles@2
+            displayName: 'Deploy TradeExecutor'
+            inputs:
+              SourceFolder: '$(System.ArtifactsDirectory)/drop/TradeExecutor'
+              Contents: '**'
+              TargetFolder: 'C:\DerivTrading\TradeExecutor'
+              OverWrite: true
+              
+          - task: PowerShell@2
+            displayName: 'Start Services'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Start-Service -Name "DerivSignalScraper"
+                Start-Service -Name "DerivTradeExecutor"
+                
+                # Wait and check service status
+                Start-Sleep -Seconds 5
+                Get-Service -Name "DerivSignalScraper"
+                Get-Service -Name "DerivTradeExecutor"
