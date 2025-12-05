@@ -43,6 +43,11 @@ public interface ICTraderClient
     Task AuthenticateAccountAsync(long accountId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Get list of accounts accessible with the current access token
+    /// </summary>
+    Task<List<ProtoOACtidTraderAccount>> GetAccountListAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Send a message to cTrader server
     /// </summary>
     Task SendMessageAsync<T>(T message, int payloadType, CancellationToken cancellationToken = default);

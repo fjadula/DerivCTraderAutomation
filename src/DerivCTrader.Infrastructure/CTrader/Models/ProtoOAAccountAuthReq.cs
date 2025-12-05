@@ -54,12 +54,12 @@ public class ProtoOAAccountAuthReq : IMessage<ProtoOAAccountAuthReq>
     {
         if (CtidTraderAccountId != 0)
         {
-            output.WriteRawTag(8); // Field 1, wire type 0 (varint)
+            output.WriteRawTag(16); // Field 2, wire type 0 (varint)
             output.WriteInt64(CtidTraderAccountId);
         }
         if (AccessToken.Length != 0)
         {
-            output.WriteRawTag(18); // Field 2, wire type 2 (length-delimited)
+            output.WriteRawTag(26); // Field 3, wire type 2 (length-delimited)
             output.WriteString(AccessToken);
         }
     }

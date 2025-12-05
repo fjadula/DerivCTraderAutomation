@@ -67,9 +67,9 @@ public class CTraderConnectionTest
                 return;
             }
 
-            // Step 3: Authenticate Account
-            Console.WriteLine("\n3️⃣ Authenticating account 2295141...");
-            await _client.AuthenticateAccountAsync(2295141);
+            // Step 3: Authenticate Account (try demo account from API response)
+            Console.WriteLine("\n3️⃣ Authenticating demo account 45291837...");
+            await _client.AuthenticateAccountAsync(45291837);
             
             // Wait for authentication response
             await Task.Delay(2000);

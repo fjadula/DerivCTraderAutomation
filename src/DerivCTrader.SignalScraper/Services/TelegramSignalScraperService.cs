@@ -95,7 +95,7 @@ public class TelegramSignalScraperService : BackgroundService
                 "api_hash" => account1["ApiHash"],
                 "phone_number" => account1["PhoneNumber"],
                 "password" => account1["Password"],
-                "session_pathname" => "WTelegram.session.account1",
+                "session_pathname" => "DerivCTrader",
                 _ => null
             };
         });
@@ -128,7 +128,7 @@ public class TelegramSignalScraperService : BackgroundService
                     "api_hash" => account2["ApiHash"],
                     "phone_number" => account2["PhoneNumber"],
                     "password" => account2["Password"],
-                    "session_pathname" => "WTelegram.session.account2",
+                    "session_pathname" => "DerivCTrader2",
                     _ => null
                 };
             });

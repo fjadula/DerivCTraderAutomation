@@ -197,6 +197,52 @@ public class CTraderClient : ICTraderClient, IDisposable
         }
     }
 
+    public async Task<List<ProtoOACtidTraderAccount>> GetAccountListAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            _logger.LogInformation("=== CTRADER: Fetching account list ===");
+            Console.WriteLine("=== CTRADER: Fetching account list ===");
+
+            var req = new ProtoOAGetAccountListByAccessTokenReq
+            {
+                AccessToken = _accessToken
+            };
+
+            await SendMessageAsync(req, (int)ProtoOAPayloadType.ProtoOaGetAccountListByAccessTokenReq, cancellationToken);
+
+            var response = await WaitForResponseAsync<ProtoOAGetAccountListByAccessTokenRes>(
+                (int)ProtoOAPayloadType.ProtoOaGetAccountListByAccessTokenRes,
+                TimeSpan.FromSeconds(10),
+                cancellationToken);
+
+            if (response != null)
+            {
+                _logger.LogInformation("=== CTRADER: ✅ Found {Count} accounts ===", response.CtidTraderAccounts.Count);
+                Console.WriteLine($"=== CTRADER: ✅ Found {response.CtidTraderAccounts.Count} accounts ===");
+                
+                foreach (var account in response.CtidTraderAccounts)
+                {
+                    var accountType = account.IsLive ? "LIVE" : "DEMO";
+                    _logger.LogInformation("  Account ID: {AccountId} ({Type})", account.CtidTraderAccountId, accountType);
+                    Console.WriteLine($"  Account ID: {account.CtidTraderAccountId} ({accountType})");
+                }
+                
+                return response.CtidTraderAccounts;
+            }
+            else
+            {
+                throw new Exception("Failed to get account list - no response");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get account list");
+            Console.WriteLine($"=== CTRADER: ❌ Failed to get account list: {ex.Message} ===");
+            throw;
+        }
+    }
+
     public async Task AuthenticateAccountAsync(long accountId, CancellationToken cancellationToken = default)
     {
         try
@@ -245,44 +291,48 @@ public class CTraderClient : ICTraderClient, IDisposable
         await _sendLock.WaitAsync(cancellationToken);
         try
         {
-            byte[] payload;
+            byte[] innerPayload;
             
             if (message is IMessage protoMessage)
             {
-                payload = protoMessage.ToByteArray();
+                innerPayload = protoMessage.ToByteArray();
             }
             else
             {
                 var json = JsonConvert.SerializeObject(message);
-                payload = Encoding.UTF8.GetBytes(json);
+                innerPayload = Encoding.UTF8.GetBytes(json);
             }
 
-            // cTrader protocol: [4 bytes: message length] [4 bytes: payload type] [payload data]
-            // payload type in big-endian (network byte order)
-            var payloadTypeBytes = BitConverter.GetBytes(payloadType);
-            if (BitConverter.IsLittleEndian)
-                Array.Reverse(payloadTypeBytes);
+            // Wrap in ProtoMessage as per cTrader Open API spec
+            var protoMsg = new ProtoMessage
+            {
+                PayloadType = (uint)payloadType,
+                Payload = innerPayload
+            };
 
-            var totalMessageLength = 4 + payload.Length; // 4 bytes for payload type + payload
-            
-            // Convert to big-endian (network byte order)
-            var lengthBytes = BitConverter.GetBytes(totalMessageLength);
+            var protoMsgBytes = protoMsg.ToByteArray();
+            var protoMsgHex = BitConverter.ToString(protoMsgBytes);
+            _logger.LogDebug("ProtoMessage bytes: {Bytes}", protoMsgHex);
+            Console.WriteLine($"=== CTRADER: Sending ProtoMessage {protoMsgHex} ===");
+
+            // cTrader protocol: [4 bytes: message length (little-endian)] [ProtoMessage bytes]
+            // Documentation note refers to big-endian platforms needing to reverse bytes. Windows already little-endian.
+            var lengthBytes = BitConverter.GetBytes(protoMsgBytes.Length);
             if (BitConverter.IsLittleEndian)
                 Array.Reverse(lengthBytes);
 
-            // Write length prefix
+            _logger.LogDebug("Sending length prefix bytes: {Bytes}", BitConverter.ToString(lengthBytes));
+
+            // Write length prefix (big-endian network order)
             await _stream.WriteAsync(lengthBytes, 0, lengthBytes.Length, cancellationToken);
             
-            // Write payload type
-            await _stream.WriteAsync(payloadTypeBytes, 0, payloadTypeBytes.Length, cancellationToken);
-            
-            // Write payload
-            await _stream.WriteAsync(payload, 0, payload.Length, cancellationToken);
+            // Write ProtoMessage
+            await _stream.WriteAsync(protoMsgBytes, 0, protoMsgBytes.Length, cancellationToken);
             
             await _stream.FlushAsync(cancellationToken);
 
-            _logger.LogDebug("Sent message: PayloadType={PayloadType}, PayloadSize={PayloadSize}, TotalSize={TotalSize}", 
-                payloadType, payload.Length, totalMessageLength + 4);
+            _logger.LogDebug("Sent ProtoMessage: PayloadType={PayloadType}, InnerPayloadSize={InnerSize}, ProtoMessageSize={ProtoSize}", 
+                payloadType, innerPayload.Length, protoMsgBytes.Length);
         }
         finally
         {
@@ -331,7 +381,7 @@ public class CTraderClient : ICTraderClient, IDisposable
         {
             while (!cancellationToken.IsCancellationRequested && IsConnected && _stream != null)
             {
-                // Read message length (4 bytes)
+                // Read message length (4 bytes, little-endian from server)
                 var lengthBuffer = new byte[4];
                 var bytesRead = await ReadExactlyAsync(_stream, lengthBuffer, 0, 4, cancellationToken);
                 
@@ -341,8 +391,11 @@ public class CTraderClient : ICTraderClient, IDisposable
                     await DisconnectAsync();
                     break;
                 }
+                
+                var lengthBytesHex = BitConverter.ToString(lengthBuffer);
+                _logger.LogInformation("Received length prefix bytes: {Bytes}", lengthBytesHex);
+                Console.WriteLine($"=== CTRADER: Length prefix bytes {lengthBytesHex} ===");
 
-                // Convert from big-endian (network byte order)
                 if (BitConverter.IsLittleEndian)
                     Array.Reverse(lengthBuffer);
                 
@@ -354,17 +407,24 @@ public class CTraderClient : ICTraderClient, IDisposable
                     break;
                 }
 
-                // Read full message
-                var messageBuffer = new byte[messageLength];
-                bytesRead = await ReadExactlyAsync(_stream, messageBuffer, 0, messageLength, cancellationToken);
+                // Read ProtoMessage bytes
+                var protoMsgBuffer = new byte[messageLength];
+                bytesRead = await ReadExactlyAsync(_stream, protoMsgBuffer, 0, messageLength, cancellationToken);
                 
                 if (bytesRead < messageLength)
                 {
-                    _logger.LogError("Incomplete message received: {Received}/{Expected}", bytesRead, messageLength);
+                    _logger.LogError("Incomplete ProtoMessage received: {Received}/{Expected}", bytesRead, messageLength);
                     break;
                 }
 
-                await ProcessMessageAsync(messageBuffer, messageLength);
+                // Deserialize ProtoMessage
+                var protoMsg = ProtoMessage.Parser.ParseFrom(protoMsgBuffer);
+
+                _logger.LogDebug("Received ProtoMessage: PayloadType={PayloadType}, PayloadSize={Size}", 
+                    protoMsg.PayloadType, protoMsg.Payload.Length);
+
+                // Process the inner payload
+                await ProcessMessageAsync((int)protoMsg.PayloadType, protoMsg.Payload, protoMsg.Payload.Length);
             }
         }
         catch (Exception ex)
@@ -390,24 +450,40 @@ public class CTraderClient : ICTraderClient, IDisposable
         return totalRead;
     }
 
-    private async Task ProcessMessageAsync(byte[] buffer, int length)
+    private async Task ProcessMessageAsync(int payloadType, byte[] buffer, int length)
     {
         try
         {
-            // Extract payload type (first 4 bytes, big-endian)
-            var payloadTypeBytes = new byte[4];
-            Array.Copy(buffer, 0, payloadTypeBytes, 0, 4);
-
-            if (BitConverter.IsLittleEndian)
-                Array.Reverse(payloadTypeBytes);
-
-            var payloadType = BitConverter.ToInt32(payloadTypeBytes, 0);
-
-            // Extract payload (remaining bytes)
-            var payload = new byte[length - 4];
-            Array.Copy(buffer, 4, payload, 0, payload.Length);
+            // payload already separated; buffer is payload only
+            var payload = buffer;
 
             _logger.LogDebug("Received message: PayloadType={PayloadType}, Size={Size}", payloadType, length);
+
+            // Check for error responses and log them
+            if (payloadType == (int)ProtoOAPayloadType.ProtoOaErrorRes)
+            {
+                _logger.LogError("=== CTRADER ERROR RESPONSE (PayloadType={PayloadType}) ===", payloadType);
+                _logger.LogError("Raw payload hex: {Hex}", BitConverter.ToString(payload));
+                Console.WriteLine($"=== CTRADER ERROR RESPONSE (PayloadType={payloadType}) ===");
+                Console.WriteLine($"Raw payload hex: {BitConverter.ToString(payload)}");
+                
+                try
+                {
+                    var errorMsg = ProtoOAErrorRes.Parser.ParseFrom(payload);
+                    _logger.LogError("ErrorCode: {ErrorCode}", errorMsg.ErrorCode);
+                    _logger.LogError("Description: {Description}", errorMsg.Description);
+                    _logger.LogError("AccountId: {AccountId}", errorMsg.CtidTraderAccountId);
+                    Console.WriteLine($"ErrorCode: {errorMsg.ErrorCode}");
+                    Console.WriteLine($"Description: {errorMsg.Description}");
+                    Console.WriteLine($"AccountId: {errorMsg.CtidTraderAccountId}");
+                    Console.WriteLine($"================================");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to parse error response");
+                    Console.WriteLine($"Failed to parse error response: {ex.Message}");
+                }
+            }
 
             // Check if someone is waiting for this response
             if (_pendingResponses.TryGetValue(payloadType, out var tcs))

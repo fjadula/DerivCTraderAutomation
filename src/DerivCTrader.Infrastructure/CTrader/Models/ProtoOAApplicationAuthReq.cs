@@ -54,12 +54,12 @@ public class ProtoOAApplicationAuthReq : IMessage<ProtoOAApplicationAuthReq>
     {
         if (ClientId.Length != 0)
         {
-            output.WriteRawTag(10); // Field 1, wire type 2 (length-delimited)
+            output.WriteRawTag(18); // Field 2, wire type 2 (length-delimited)
             output.WriteString(ClientId);
         }
         if (ClientSecret.Length != 0)
         {
-            output.WriteRawTag(18); // Field 2, wire type 2 (length-delimited)
+            output.WriteRawTag(26); // Field 3, wire type 2 (length-delimited)
             output.WriteString(ClientSecret);
         }
     }
