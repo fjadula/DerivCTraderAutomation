@@ -61,7 +61,7 @@ stages:
           $publishFolder = "$(Build.ArtifactStagingDirectory)\signalscraper"
           Write-Host "Publishing SignalScraper to $publishFolder"
 
-          dotnet publish ".\src\DerivCTrader.SignalScraper\DerivCTrader.SignalScraper.csproj" `
+          dotnet publish "$(Build.SourcesDirectory)\src\DerivCTrader.SignalScraper\DerivCTrader.SignalScraper.csproj" `
             -c $(buildConfiguration) `
             -r win-x64 `
             --self-contained true `
@@ -83,7 +83,7 @@ stages:
           $publishFolder = "$(Build.ArtifactStagingDirectory)\tradeexecutor"
           Write-Host "Publishing TradeExecutor to $publishFolder"
 
-          dotnet publish ".\src\DerivCTrader.TradeExecutor\DerivCTrader.TradeExecutor.csproj" `
+          dotnet publish "$(Build.SourcesDirectory)\src\DerivCTrader.TradeExecutor\DerivCTrader.TradeExecutor.csproj" `
             -c $(buildConfiguration) `
             -r win-x64 `
             --self-contained true `
