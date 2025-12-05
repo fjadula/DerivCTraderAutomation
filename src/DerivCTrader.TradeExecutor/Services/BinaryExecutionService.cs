@@ -124,24 +124,22 @@ public class BinaryExecutionService : BackgroundService
             return;
         }
 
-        // Save to TradeExecutionQueue
-        var queueItem = new TradeExecutionQueue
+        // Save to BinaryOptionTrade (not TradeExecutionQueue)
+        // NOTE: TradeExecutionQueue is ONLY for cTrader→Deriv matching
+        var binaryTrade = new BinaryOptionTrade
         {
-            Asset = signal.Asset,
+            AssetName = signal.Asset,
             Direction = direction,
-            Platform = "Deriv",
-            DerivContractId = result.ContractId,
-            Stake = _defaultStake,
-            ExpiryMinutes = expiryMinutes,
-            StrategyName = $"{signal.Asset}_{DateTime.UtcNow:yyyyMMddHHmm}_{direction}",
+            OpenTime = DateTime.UtcNow,
+            ExpiryLength = expiryMinutes,
+            StrategyName = $"{signal.ProviderName}_{signal.Asset}_{DateTime.UtcNow:yyyyMMddHHmmss}",
             CreatedAt = DateTime.UtcNow,
-            Timeframe = signal.Timeframe,
-            Pattern = signal.Pattern,
-            ProviderChannelId = signal.ProviderChannelId,
-            ProviderName = signal.ProviderName
+            TradeStake = _defaultStake,
+            ExpectedExpiryTimestamp = DateTime.UtcNow.AddMinutes(expiryMinutes)
         };
 
-        await _repository.EnqueueTradeAsync(queueItem);
+        // TODO: Store contract ID if BinaryOptionTrade schema is extended
+        await _repository.CreateBinaryTradeAsync(binaryTrade);
 
         // Mark signal as processed
         await _repository.MarkSignalAsProcessedAsync(signal.SignalId);

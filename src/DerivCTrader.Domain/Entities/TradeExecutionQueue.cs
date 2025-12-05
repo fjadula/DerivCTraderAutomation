@@ -1,36 +1,62 @@
 namespace DerivCTrader.Domain.Entities;
 
 /// <summary>
-/// Unified queue for both cTrader and Deriv trade executions
+/// Matching queue between cTrader executions and Deriv binary detections
+/// 
+/// PURPOSE: Acts as a buffer to match cTrader order executions with Deriv binary option placements
+/// 
+/// FLOW:
+/// 1. cTrader: Order executes (price crosses entry) → Write to this queue
+/// 2. Deriv: Place binary option with queue data
+/// 3. KhulaFxTradeMonitor: Detects binary execution on Deriv
+/// 4. Match: Find corresponding row using (Asset, Direction) FIFO
+/// 5. Cleanup: Delete matched queue row
+/// 
+/// NOTE: This queue contains ONLY matching metadata, not full trade details.
+/// Full Deriv trade details (stake, expiry, outcome, profit) belong in BinaryOptionTrades table.
 /// </summary>
 public class TradeExecutionQueue
 {
+    /// <summary>
+    /// Queue row ID (auto-increment)
+    /// </summary>
     public int QueueId { get; set; }
-    
-    // Common fields (existing)
-    public string Asset { get; set; } = string.Empty;
-    public string Direction { get; set; } = string.Empty;
-    public string? StrategyName { get; set; }
-    public bool IsOpposite { get; set; }
-    public DateTime CreatedAt { get; set; }
-    
-    // Platform identifier
-    public string Platform { get; set; } = "cTrader";  // "cTrader" or "Deriv"
-    
-    // cTrader-specific fields
+
+    /// <summary>
+    /// cTrader order ID from execution event
+    /// </summary>
     public string? CTraderOrderId { get; set; }
-    
-    // Deriv-specific fields
-    public string? DerivContractId { get; set; }
-    public decimal? Stake { get; set; }
-    public int? ExpiryMinutes { get; set; }
-    public DateTime? SettledAt { get; set; }
-    public string? Outcome { get; set; }  // "Win", "Loss", null = pending
-    public decimal? Profit { get; set; }
-    
-    // Signal metadata
-    public string? Timeframe { get; set; }
-    public string? Pattern { get; set; }
+
+    /// <summary>
+    /// Asset symbol (e.g., "EURUSD")
+    /// Used for matching with KhulaFxTradeMonitor detections
+    /// </summary>
+    public string Asset { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Trade direction (e.g., "Buy", "Sell")
+    /// Used for matching with KhulaFxTradeMonitor detections
+    /// </summary>
+    public string Direction { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Strategy name to populate in BinaryOptionTrades
+    /// Format: "ProviderName_Asset_Timestamp"
+    /// </summary>
+    public string? StrategyName { get; set; }
+
+    /// <summary>
+    /// Provider channel ID (for audit trail)
+    /// </summary>
     public string? ProviderChannelId { get; set; }
-    public string? ProviderName { get; set; }
+
+    /// <summary>
+    /// Whether this is an opposite direction trade
+    /// </summary>
+    public bool IsOpposite { get; set; }
+
+    /// <summary>
+    /// When the cTrader execution was detected
+    /// </summary>
+    public DateTime CreatedAt { get; set; }
 }

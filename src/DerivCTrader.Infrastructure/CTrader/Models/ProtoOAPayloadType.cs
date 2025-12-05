@@ -14,5 +14,6 @@ public enum ProtoOAPayloadType
     ProtoOaGetSymbolsRes = 2125,
     ProtoOaReconcileReq = 2134,
     ProtoOaReconcileRes = 2135,
+    ProtoOaSpotEvent = 2136,
     ProtoHeartbeatEvent = 51
 }

@@ -1,4 +1,6 @@
-﻿using System.Net.WebSockets;
+﻿using System.Net.Sockets;
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using DerivCTrader.Infrastructure.CTrader.Interfaces;
 using DerivCTrader.Infrastructure.CTrader.Models;
@@ -10,13 +12,14 @@ using Newtonsoft.Json;
 namespace DerivCTrader.Infrastructure.CTrader;
 
 /// <summary>
-///
+/// cTrader TCP client for port 5035 (native protobuf protocol)
 /// </summary>
 public class CTraderClient : ICTraderClient, IDisposable
 {
     private readonly ILogger<CTraderClient> _logger;
     private readonly IConfiguration _configuration;
-    private readonly ClientWebSocket _webSocket;
+    private TcpClient? _tcpClient;
+    private Stream? _stream;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly Dictionary<int, TaskCompletionSource<byte[]>> _pendingResponses = new();
     private CancellationTokenSource? _receiveCts;
@@ -27,10 +30,12 @@ public class CTraderClient : ICTraderClient, IDisposable
     private string _accessToken = string.Empty;
     private string _refreshToken = string.Empty;
     private long _accountId;
-    private string _webSocketUrl = string.Empty;
+    private string _host = string.Empty;
+    private int _port;
+    private bool _useSsl;
     private int _heartbeatInterval;
 
-    public bool IsConnected => _webSocket.State == WebSocketState.Open;
+    public bool IsConnected => _tcpClient?.Connected ?? false;
     public bool IsApplicationAuthenticated { get; private set; }
     public bool IsAccountAuthenticated { get; private set; }
 
@@ -41,7 +46,6 @@ public class CTraderClient : ICTraderClient, IDisposable
     {
         _logger = logger;
         _configuration = configuration;
-        _webSocket = new ClientWebSocket();
         
         LoadConfiguration();
     }
@@ -58,21 +62,44 @@ public class CTraderClient : ICTraderClient, IDisposable
         var accountIdKey = environment == "Live" ? "LiveAccountId" : "DemoAccountId";
         _accountId = long.Parse(ctraderSection[accountIdKey] ?? throw new InvalidOperationException($"CTrader:{accountIdKey} is required"));
         
-        _webSocketUrl = ctraderSection["WebSocketUrl"] ?? "wss://demo.ctraderapi.com";
+        // NEW: TCP configuration instead of WebSocket
+        _host = ctraderSection["Host"] ?? "demo.ctraderapi.com";
+        _port = int.Parse(ctraderSection["Port"] ?? "5035");
+        _useSsl = bool.Parse(ctraderSection["UseSsl"] ?? "true");
         _heartbeatInterval = int.Parse(ctraderSection["HeartbeatIntervalSeconds"] ?? "25");
 
-        _logger.LogInformation("CTrader configuration loaded: Environment={Environment}, AccountId={AccountId}", 
-            environment, _accountId);
+        _logger.LogInformation("CTrader configuration loaded: Environment={Environment}, Host={Host}:{Port}, SSL={SSL}", 
+            environment, _host, _port, _useSsl);
     }
 
     public async Task ConnectAsync(CancellationToken cancellationToken = default)
     {
         try
         {
-            _logger.LogInformation("=== CTRADER: Connecting to {Url} ===", _webSocketUrl);
-            Console.WriteLine($"=== CTRADER: Connecting to {_webSocketUrl} ===");
+            _logger.LogInformation("=== CTRADER: Connecting to {Host}:{Port} (TCP/SSL) ===", _host, _port);
+            Console.WriteLine($"=== CTRADER: Connecting to {_host}:{_port} (TCP/SSL) ===");
 
-            await _webSocket.ConnectAsync(new Uri(_webSocketUrl), cancellationToken);
+            _tcpClient = new TcpClient();
+            await _tcpClient.ConnectAsync(_host, _port, cancellationToken);
+
+            // Wrap in SSL stream if required
+            if (_useSsl)
+            {
+                var sslStream = new SslStream(
+                    _tcpClient.GetStream(),
+                    false,
+                    ValidateServerCertificate,
+                    null);
+
+                await sslStream.AuthenticateAsClientAsync(_host);
+                _stream = sslStream;
+                
+                _logger.LogInformation("=== CTRADER: ✅ SSL handshake complete ===");
+            }
+            else
+            {
+                _stream = _tcpClient.GetStream();
+            }
 
             _logger.LogInformation("=== CTRADER: ✅ Connected ===");
             Console.WriteLine("=== CTRADER: ✅ Connected ===");
@@ -94,16 +121,29 @@ public class CTraderClient : ICTraderClient, IDisposable
         }
     }
 
+    private bool ValidateServerCertificate(
+        object sender,
+        X509Certificate? certificate,
+        X509Chain? chain,
+        SslPolicyErrors sslPolicyErrors)
+    {
+        // For production, implement proper certificate validation
+        // For now, accept all certificates
+        if (sslPolicyErrors == SslPolicyErrors.None)
+            return true;
+
+        _logger.LogWarning("Certificate validation warning: {Errors}", sslPolicyErrors);
+        return true; // Accept anyway for demo
+    }
+
     public async Task DisconnectAsync()
     {
         try
         {
             _receiveCts?.Cancel();
             
-            if (_webSocket.State == WebSocketState.Open)
-            {
-                await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Client disconnect", CancellationToken.None);
-            }
+            _stream?.Close();
+            _tcpClient?.Close();
 
             IsApplicationAuthenticated = false;
             IsAccountAuthenticated = false;
@@ -199,6 +239,9 @@ public class CTraderClient : ICTraderClient, IDisposable
 
     public async Task SendMessageAsync<T>(T message, int payloadType, CancellationToken cancellationToken = default)
     {
+        if (_stream == null || !IsConnected)
+            throw new InvalidOperationException("Not connected to cTrader");
+
         await _sendLock.WaitAsync(cancellationToken);
         try
         {
@@ -214,15 +257,13 @@ public class CTraderClient : ICTraderClient, IDisposable
                 payload = Encoding.UTF8.GetBytes(json);
             }
 
+            // cTrader protocol: [4 bytes: payload type] [payload data]
             var messageBytes = new byte[sizeof(int) + payload.Length];
             BitConverter.GetBytes(payloadType).CopyTo(messageBytes, 0);
             payload.CopyTo(messageBytes, sizeof(int));
 
-            await _webSocket.SendAsync(
-                new ArraySegment<byte>(messageBytes),
-                WebSocketMessageType.Binary,
-                true,
-                cancellationToken);
+            await _stream.WriteAsync(messageBytes, 0, messageBytes.Length, cancellationToken);
+            await _stream.FlushAsync(cancellationToken);
 
             _logger.LogDebug("Sent message: PayloadType={PayloadType}, Size={Size}", payloadType, messageBytes.Length);
         }
@@ -273,20 +314,19 @@ public class CTraderClient : ICTraderClient, IDisposable
 
         try
         {
-            while (!cancellationToken.IsCancellationRequested && _webSocket.State == WebSocketState.Open)
+            while (!cancellationToken.IsCancellationRequested && IsConnected && _stream != null)
             {
-                var result = await _webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+                // Read from TCP stream
+                var bytesRead = await _stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
 
-                if (result.MessageType == WebSocketMessageType.Binary)
+                if (bytesRead == 0)
                 {
-                    await ProcessMessageAsync(buffer, result.Count);
-                }
-                else if (result.MessageType == WebSocketMessageType.Close)
-                {
-                    _logger.LogWarning("WebSocket closed by server");
+                    _logger.LogWarning("TCP connection closed by server");
                     await DisconnectAsync();
                     break;
                 }
+
+                await ProcessMessageAsync(buffer, bytesRead);
             }
         }
         catch (Exception ex)
@@ -364,7 +404,8 @@ public class CTraderClient : ICTraderClient, IDisposable
     {
         _receiveCts?.Cancel();
         _receiveCts?.Dispose();
-        _webSocket?.Dispose();
+        _stream?.Dispose();
+        _tcpClient?.Dispose();
         _sendLock?.Dispose();
     }
 }

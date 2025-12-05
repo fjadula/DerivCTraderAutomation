@@ -56,6 +56,8 @@ public class OutcomeMonitorService : BackgroundService
 
     private async Task CheckPendingTradesAsync(CancellationToken cancellationToken)
     {
+        // Get pending Deriv trades (from BinaryOptionTrade via TradeExecutionQueue)
+        // TradeExecutionQueue is the matching queue between cTrader and Deriv
         var pendingTrades = await _repository.GetPendingDerivTradesAsync();
 
         if (pendingTrades.Count == 0)
@@ -68,40 +70,24 @@ public class OutcomeMonitorService : BackgroundService
             try
             {
                 // Check if expired
-                var expiryTime = trade.CreatedAt.AddMinutes(trade.ExpiryMinutes ?? 21);
+                var expiryTime = trade.CreatedAt.AddMinutes(15); // Default wait before checking outcome
                 
                 if (DateTime.UtcNow < expiryTime)
                     continue;
 
-                // Get outcome from Deriv
-                if (string.IsNullOrEmpty(trade.DerivContractId))
-                    continue;
+                // TODO: Get outcome from Deriv API
+                // This requires contract ID to be stored in TradeExecutionQueue or linked table
+                // var outcome = await _derivClient.GetContractOutcomeAsync(trade.ContractId, cancellationToken);
 
-                var outcome = await _derivClient.GetContractOutcomeAsync(trade.DerivContractId, cancellationToken);
+                // For now, mark as checked
+                _logger.LogInformation("⏳ Trade expired and pending outcome verification: {Asset} {Direction}",
+                    trade.Asset, trade.Direction);
 
-                if (outcome == null)
-                {
-                    _logger.LogWarning("Could not get outcome for contract {ContractId}", trade.DerivContractId);
-                    continue;
-                }
-
-                // Update in database
-                await _repository.UpdateDerivTradeOutcomeAsync(
-                    trade.QueueId,
-                    outcome.Status ?? "Unknown",
-                    outcome.Profit);
-
-                _logger.LogInformation("🎉 TRADE SETTLED: {Asset} {Direction} {Status} ${Profit}",
-                    trade.Asset, trade.Direction, outcome.Status, outcome.Profit);
-                Console.WriteLine($"🎉 SETTLED: {trade.Asset} {trade.Direction} {outcome.Status} ${outcome.Profit}");
-
-                // Log balance
-                try
-                {
-                    var balance = await _derivClient.GetBalanceAsync(cancellationToken);
-                    Console.WriteLine($"💰 Balance: ${balance}");
-                }
-                catch { }
+                // TODO: Update trade result when Deriv API integration complete
+                // await _repository.UpdateDerivTradeOutcomeAsync(
+                //     trade.QueueId,
+                //     outcome.Status ?? "Unknown",
+                //     outcome.Profit);
             }
             catch (Exception ex)
             {
