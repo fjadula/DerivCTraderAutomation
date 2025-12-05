@@ -6,4 +6,6 @@ public class ProviderChannelConfig
     public string? ProviderName { get; set; }
     public bool TakeOriginal { get; set; }
     public bool TakeOpposite { get; set; }
+    public bool IsActive { get; set; }
+    public DateTime CreatedAt { get; set; }
 }

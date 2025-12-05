@@ -1,9 +1,10 @@
 using System.Text.RegularExpressions;
+using DerivCTrader.Application.Interfaces;
 using Microsoft.Extensions.Logging;
 
 namespace DerivCTrader.Infrastructure.ExpiryCalculation;
 
-public class BinaryExpiryCalculator
+public class BinaryExpiryCalculator : IBinaryExpiryCalculator
 {
     private readonly ILogger<BinaryExpiryCalculator> _logger;
     private static readonly HashSet<string> VolatilityIndices = new(StringComparer.OrdinalIgnoreCase)
@@ -16,6 +17,14 @@ public class BinaryExpiryCalculator
     public BinaryExpiryCalculator(ILogger<BinaryExpiryCalculator> logger)
     {
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Interface implementation: Calculate expiry in minutes for a given signal type and asset
+    /// </summary>
+    public int CalculateExpiry(string signalType, string asset)
+    {
+        return CalculateExpiryMinutes(asset);
     }
 
     /// <summary>

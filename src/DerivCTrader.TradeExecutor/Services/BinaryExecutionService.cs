@@ -1,4 +1,5 @@
 ﻿using DerivCTrader.Application.Interfaces;
+using DerivCTrader.Infrastructure.Deriv;
 using DerivCTrader.Domain.Entities;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;

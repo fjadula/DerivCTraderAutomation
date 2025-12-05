@@ -18,7 +18,9 @@ public class CTraderService : ICTraderService
 
     public bool IsConnected => _client.IsConnected;
 
+    #pragma warning disable CS0067
     public event EventHandler<OrderExecutedEventArgs>? OrderExecuted;
+    #pragma warning restore CS0067
 
     public CTraderService(
         ILogger<CTraderService> logger,

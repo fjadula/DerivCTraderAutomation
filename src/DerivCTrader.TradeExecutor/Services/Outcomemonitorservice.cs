@@ -1,4 +1,5 @@
 ﻿using DerivCTrader.Application.Interfaces;
+using DerivCTrader.Infrastructure.Deriv;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -87,7 +88,7 @@ public class OutcomeMonitorService : BackgroundService
                 // Update in database
                 await _repository.UpdateDerivTradeOutcomeAsync(
                     trade.QueueId,
-                    outcome.Status,
+                    outcome.Status ?? "Unknown",
                     outcome.Profit);
 
                 _logger.LogInformation("🎉 TRADE SETTLED: {Asset} {Direction} {Status} ${Profit}",

@@ -52,7 +52,8 @@ public class SqlServerTradeRepository : ITradeRepository
             command.Parameters.AddWithValue("@ReceivedAt", signal.ReceivedAt);
             command.Parameters.AddWithValue("@CreatedAt", signal.CreatedAt);
 
-            var signalId = (int)await command.ExecuteScalarAsync();
+            var result = await command.ExecuteScalarAsync();
+            var signalId = (int)(result ?? 0);
 
             _logger.LogInformation("✅ Signal saved to queue: ID={SignalId}, Asset={Asset}",
                 signalId, signal.Asset);
@@ -177,7 +178,8 @@ public class SqlServerTradeRepository : ITradeRepository
             command.Parameters.AddWithValue("@PurchasedAt", trade.PurchasedAt);
             command.Parameters.AddWithValue("@CreatedAt", trade.CreatedAt);
 
-            var tradeId = (int)await command.ExecuteScalarAsync();
+            var result = await command.ExecuteScalarAsync();
+            var tradeId = (int)(result ?? 0);
 
             _logger.LogInformation("✅ Deriv trade saved: ID={TradeId}, Contract={ContractId}",
                 tradeId, trade.ContractId);
@@ -406,5 +408,105 @@ public class SqlServerTradeRepository : ITradeRepository
             _logger.LogError(ex, "Failed to get active providers");
             throw;
         }
+    }
+
+    // ===== MISSING INTERFACE IMPLEMENTATIONS =====
+
+    public async Task<int> SaveParsedSignalAsync(ParsedSignal signal)
+    {
+        // TODO: Implement SaveParsedSignalAsync
+        _logger.LogWarning("SaveParsedSignalAsync not yet implemented");
+        return 0;
+    }
+
+    public async Task<List<ParsedSignal>> GetUnprocessedSignalsAsync()
+    {
+        // TODO: Implement GetUnprocessedSignalsAsync
+        _logger.LogWarning("GetUnprocessedSignalsAsync not yet implemented");
+        return new List<ParsedSignal>();
+    }
+
+    public async Task MarkSignalAsProcessedAsync(int signalId)
+    {
+        // TODO: Implement MarkSignalAsProcessedAsync
+        _logger.LogWarning("MarkSignalAsProcessedAsync not yet implemented");
+    }
+
+    public async Task<int> EnqueueTradeAsync(TradeExecutionQueue queueItem)
+    {
+        // TODO: Implement EnqueueTradeAsync
+        _logger.LogWarning("EnqueueTradeAsync not yet implemented");
+        return 0;
+    }
+
+    public async Task<TradeExecutionQueue?> DequeueMatchingTradeAsync(string asset, string direction)
+    {
+        // TODO: Implement DequeueMatchingTradeAsync
+        _logger.LogWarning("DequeueMatchingTradeAsync not yet implemented");
+        return null;
+    }
+
+    public async Task DeleteQueueItemAsync(int queueId)
+    {
+        // TODO: Implement DeleteQueueItemAsync
+        _logger.LogWarning("DeleteQueueItemAsync not yet implemented");
+    }
+
+    public async Task<List<TradeExecutionQueue>> GetPendingDerivTradesAsync()
+    {
+        // TODO: Implement GetPendingDerivTradesAsync
+        _logger.LogWarning("GetPendingDerivTradesAsync not yet implemented");
+        return new List<TradeExecutionQueue>();
+    }
+
+    public async Task<List<ProviderChannelConfig>> GetAllProviderConfigsAsync()
+    {
+        return await GetAllActiveProvidersAsync();
+    }
+
+    public async Task<int> CreateForexTradeAsync(ForexTrade trade)
+    {
+        // TODO: Implement CreateForexTradeAsync
+        _logger.LogWarning("CreateForexTradeAsync not yet implemented");
+        return 0;
+    }
+
+    public async Task UpdateForexTradeAsync(ForexTrade trade)
+    {
+        // TODO: Implement UpdateForexTradeAsync
+        _logger.LogWarning("UpdateForexTradeAsync not yet implemented");
+    }
+
+    public async Task<ForexTrade?> GetForexTradeByIdAsync(int tradeId)
+    {
+        // TODO: Implement GetForexTradeByIdAsync
+        _logger.LogWarning("GetForexTradeByIdAsync not yet implemented");
+        return null;
+    }
+
+    public async Task<int> CreateBinaryTradeAsync(BinaryOptionTrade trade)
+    {
+        // TODO: Implement CreateBinaryTradeAsync
+        _logger.LogWarning("CreateBinaryTradeAsync not yet implemented");
+        return 0;
+    }
+
+    public async Task UpdateBinaryTradeAsync(BinaryOptionTrade trade)
+    {
+        // TODO: Implement UpdateBinaryTradeAsync
+        _logger.LogWarning("UpdateBinaryTradeAsync not yet implemented");
+    }
+
+    public async Task<BinaryOptionTrade?> GetBinaryTradeByIdAsync(int tradeId)
+    {
+        // TODO: Implement GetBinaryTradeByIdAsync
+        _logger.LogWarning("GetBinaryTradeByIdAsync not yet implemented");
+        return null;
+    }
+
+    public async Task CreateTradeIndicatorAsync(TradeIndicator indicator)
+    {
+        // TODO: Implement CreateTradeIndicatorAsync
+        _logger.LogWarning("CreateTradeIndicatorAsync not yet implemented");
     }
 }

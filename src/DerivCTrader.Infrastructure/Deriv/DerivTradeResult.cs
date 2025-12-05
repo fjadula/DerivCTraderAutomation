@@ -1,4 +1,4 @@
-﻿namespace DerivCTrader.Infrastructure.Deriv.Models;
+﻿/*namespace DerivCTrader.Infrastructure.Deriv.Models;
 
 /// <summary>
 /// Result of placing a binary option trade
@@ -92,4 +92,4 @@ public static class DerivAssetMapper
         Console.WriteLine($"⚠️ Unknown asset: {telegramAsset}, using as-is");
         return telegramAsset;
     }
-}
+}*/

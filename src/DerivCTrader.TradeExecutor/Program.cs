@@ -1,7 +1,6 @@
 ﻿using DerivCTrader.Application.Interfaces;
 using DerivCTrader.Infrastructure.Database;
 using DerivCTrader.Infrastructure.Deriv;
-using DerivCTrader.Infrastructure.Deriv.Models;
 using DerivCTrader.Infrastructure.ExpiryCalculation;
 using DerivCTrader.TradeExecutor.Services;
 using Microsoft.Extensions.Configuration;

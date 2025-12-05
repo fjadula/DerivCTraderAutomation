@@ -1,6 +1,4 @@
-using DerivCTrader.Infrastructure.Deriv.Models;
-
-namespace DerivCTrader.Application.Interfaces;
+namespace DerivCTrader.Infrastructure.Deriv;
 
 /// <summary>
 /// Interface for Deriv API WebSocket client

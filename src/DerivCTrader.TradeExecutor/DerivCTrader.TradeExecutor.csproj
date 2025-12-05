@@ -20,6 +20,7 @@
   <ItemGroup>
     <ProjectReference Include="..\DerivCTrader.Application\DerivCTrader.Application.csproj" />
     <ProjectReference Include="..\DerivCTrader.Infrastructure\DerivCTrader.Infrastructure.csproj" />
+    <ProjectReference Include="..\DerivCTrader.Domain\DerivCTrader.Domain.csproj" />
   </ItemGroup>
 
   <ItemGroup>

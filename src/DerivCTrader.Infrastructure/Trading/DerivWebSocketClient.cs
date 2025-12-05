@@ -1,5 +1,5 @@
 using System.Net.WebSockets;
-using DerivCTrader.Application.Interfaces;
+using DerivCTrader.Infrastructure.Deriv;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
@@ -15,6 +15,10 @@ public class DerivWebSocketClient : IDerivClient, IDisposable
     private readonly string _apiToken;
     private WebsocketClient? _client;
     private bool _isConnected;
+    private bool _isAuthorized;
+
+    public bool IsConnected => _isConnected;
+    public bool IsAuthorized => _isAuthorized;
 
     public DerivWebSocketClient(IConfiguration configuration, ILogger<DerivWebSocketClient> logger)
     {
@@ -25,7 +29,7 @@ public class DerivWebSocketClient : IDerivClient, IDisposable
         _apiToken = derivConfig["Token"] ?? throw new InvalidOperationException("Deriv:Token not configured");
     }
 
-    public async Task ConnectAsync()
+    public async Task ConnectAsync(CancellationToken cancellationToken = default)
     {
         if (_isConnected)
             return;
@@ -77,6 +81,7 @@ public class DerivWebSocketClient : IDerivClient, IDisposable
             throw new Exception($"Deriv authorization failed: {response["error"]}");
         }
 
+        _isAuthorized = true;
         _logger.LogInformation("Deriv API authorized successfully");
     }
 
@@ -191,7 +196,7 @@ public class DerivWebSocketClient : IDerivClient, IDisposable
         {
             try
             {
-                var response = JObject.Parse(msg.Text);
+                var response = JObject.Parse(msg.Text ?? "{}");
                 tcs.TrySetResult(response);
             }
             catch (Exception ex)
@@ -226,6 +231,55 @@ public class DerivWebSocketClient : IDerivClient, IDisposable
             _isConnected = false;
             _logger.LogInformation("Disconnected from Deriv WebSocket");
         }
+    }
+
+    public async Task AuthorizeAsync(CancellationToken cancellationToken = default)
+    {
+        await AuthorizeAsync();
+    }
+
+    public async Task<DerivTradeResult> PlaceBinaryOptionAsync(
+        string asset,
+        string direction,
+        decimal stake,
+        int durationMinutes,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var contractId = await ExecuteBinaryTradeAsync(asset, direction, stake, durationMinutes);
+            return new DerivTradeResult
+            {
+                Success = !string.IsNullOrEmpty(contractId),
+                ContractId = contractId,
+                BuyPrice = stake
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to place binary option");
+            return new DerivTradeResult
+            {
+                Success = false,
+                ErrorMessage = ex.Message
+            };
+        }
+    }
+
+    public async Task<DerivContractOutcome> GetContractOutcomeAsync(
+        string contractId,
+        CancellationToken cancellationToken = default)
+    {
+        // TODO: Implement GetContractOutcomeAsync
+        _logger.LogWarning("GetContractOutcomeAsync not yet fully implemented");
+        return new DerivContractOutcome { IsWin = false, Profit = 0 };
+    }
+
+    public async Task<decimal> GetBalanceAsync(CancellationToken cancellationToken = default)
+    {
+        // TODO: Implement GetBalanceAsync
+        _logger.LogWarning("GetBalanceAsync not yet fully implemented");
+        return 0m;
     }
 
     public void Dispose()

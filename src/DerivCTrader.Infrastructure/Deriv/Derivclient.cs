@@ -1,7 +1,6 @@
 ﻿using System.Net.WebSockets;
 using System.Text;
 using DerivCTrader.Application.Interfaces;
-using DerivCTrader.Infrastructure.Deriv.Models;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -72,14 +71,14 @@ public class DerivClient : IDerivClient, IDisposable
 
             var response = await SendAndReceiveAsync(request, cancellationToken);
 
-            if (response["error"] != null)
+            if (response?["error"] != null)
             {
-                var error = response["error"];
-                throw new Exception($"Authorization failed: {error["message"]}");
+                var error = response?["error"];
+                throw new Exception($"Authorization failed: {error?["message"] ?? "Unknown error"}");
             }
 
             IsAuthorized = true;
-            var balance = response["authorize"]?["balance"]?.ToString() ?? "unknown";
+            var balance = response?["authorize"]?["balance"]?.ToString() ?? "unknown";
 
             _logger.LogInformation("✅ Authorized with Deriv. Balance: {Balance}", balance);
             Console.WriteLine($"=== DERIV: ✅ Authorized. Balance: {balance} ===");
@@ -153,13 +152,13 @@ public class DerivClient : IDerivClient, IDisposable
 
             if (proposalRes["error"] != null)
             {
-                var error = proposalRes["error"];
-                _logger.LogError("Proposal failed: {Message}", error["message"]);
+                var error = proposalRes?["error"];
+                _logger.LogError("Proposal failed: {Message}", error?["message"] ?? "Unknown error");
                 return new DerivTradeResult
                 {
                     Success = false,
-                    ErrorMessage = error["message"]?.ToString(),
-                    ErrorCode = error["code"]?.ToString()
+                    ErrorMessage = error?["message"]?.ToString(),
+                    ErrorCode = error?["code"]?.ToString()
                 };
             }
 
@@ -189,21 +188,21 @@ public class DerivClient : IDerivClient, IDisposable
 
             var buyRes = await SendAndReceiveAsync(buyReq, cancellationToken);
 
-            if (buyRes["error"] != null)
+            if (buyRes?["error"] != null)
             {
-                var error = buyRes["error"];
-                _logger.LogError("Buy failed: {Message}", error["message"]);
+                var error = buyRes?["error"];
+                _logger.LogError("Buy failed: {Message}", error?["message"] ?? "Unknown error");
                 return new DerivTradeResult
                 {
                     Success = false,
-                    ErrorMessage = error["message"]?.ToString(),
-                    ErrorCode = error["code"]?.ToString()
+                    ErrorMessage = error?["message"]?.ToString(),
+                    ErrorCode = error?["code"]?.ToString()
                 };
             }
 
-            var contractId = buyRes["buy"]?["contract_id"]?.ToString();
-            var purchasePrice = buyRes["buy"]?["buy_price"]?.ToObject<decimal>() ?? 0;
-            var actualPayout = buyRes["buy"]?["payout"]?.ToObject<decimal>();
+            var contractId = buyRes?["buy"]?["contract_id"]?.ToString() ?? "unknown";
+            var purchasePrice = buyRes?["buy"]?["buy_price"]?.ToObject<decimal>() ?? 0;
+            var actualPayout = buyRes?["buy"]?["payout"]?.ToObject<decimal>();
 
             _logger.LogInformation("✅ Binary option purchased: Contract={ContractId}, Price={Price}",
                 contractId, purchasePrice);
@@ -247,12 +246,12 @@ public class DerivClient : IDerivClient, IDisposable
 
             var response = await SendAndReceiveAsync(request, cancellationToken);
 
-            if (response["error"] != null)
+            if (response?["error"] != null)
             {
-                throw new Exception($"Failed to get contract: {response["error"]["message"]}");
+                throw new Exception($"Failed to get contract: {response?["error"]?["message"] ?? "Unknown error"}");
             }
 
-            var contract = response["proposal_open_contract"];
+            var contract = response?["proposal_open_contract"];
             var status = contract?["status"]?.ToString();
             var profit = contract?["profit"]?.ToObject<decimal>() ?? 0;
             var exitSpot = contract?["exit_tick"]?.ToObject<decimal>();
@@ -287,12 +286,12 @@ public class DerivClient : IDerivClient, IDisposable
 
             var response = await SendAndReceiveAsync(request, cancellationToken);
 
-            if (response["error"] != null)
+            if (response?["error"] != null)
             {
-                throw new Exception($"Failed to get balance: {response["error"]["message"]}");
+                throw new Exception($"Failed to get balance: {response?["error"]?["message"] ?? "Unknown error"}");
             }
 
-            var balance = response["balance"]?["balance"]?.ToObject<decimal>() ?? 0;
+            var balance = response?["balance"]?["balance"]?.ToObject<decimal>() ?? 0;
             return balance;
         }
         catch (Exception ex)
