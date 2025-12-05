@@ -12,7 +12,16 @@ public class ProtoOAAccountAuthReq : IMessage<ProtoOAAccountAuthReq>
 
     public int CalculateSize()
     {
-        return sizeof(long) + AccessToken.Length + 4;
+        int size = 0;
+        if (CtidTraderAccountId != 0)
+        {
+            size += 1 + CodedOutputStream.ComputeInt64Size(CtidTraderAccountId);
+        }
+        if (AccessToken.Length != 0)
+        {
+            size += 1 + CodedOutputStream.ComputeStringSize(AccessToken);
+        }
+        return size;
     }
 
     public ProtoOAAccountAuthReq Clone()
@@ -45,10 +54,12 @@ public class ProtoOAAccountAuthReq : IMessage<ProtoOAAccountAuthReq>
     {
         if (CtidTraderAccountId != 0)
         {
+            output.WriteRawTag(8); // Field 1, wire type 0 (varint)
             output.WriteInt64(CtidTraderAccountId);
         }
         if (AccessToken.Length != 0)
         {
+            output.WriteRawTag(18); // Field 2, wire type 2 (length-delimited)
             output.WriteString(AccessToken);
         }
     }

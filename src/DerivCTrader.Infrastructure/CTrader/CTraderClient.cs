@@ -257,15 +257,32 @@ public class CTraderClient : ICTraderClient, IDisposable
                 payload = Encoding.UTF8.GetBytes(json);
             }
 
-            // cTrader protocol: [4 bytes: payload type] [payload data]
-            var messageBytes = new byte[sizeof(int) + payload.Length];
-            BitConverter.GetBytes(payloadType).CopyTo(messageBytes, 0);
-            payload.CopyTo(messageBytes, sizeof(int));
+            // cTrader protocol: [4 bytes: message length] [4 bytes: payload type] [payload data]
+            // payload type in big-endian (network byte order)
+            var payloadTypeBytes = BitConverter.GetBytes(payloadType);
+            if (BitConverter.IsLittleEndian)
+                Array.Reverse(payloadTypeBytes);
 
-            await _stream.WriteAsync(messageBytes, 0, messageBytes.Length, cancellationToken);
+            var totalMessageLength = 4 + payload.Length; // 4 bytes for payload type + payload
+            
+            // Convert to big-endian (network byte order)
+            var lengthBytes = BitConverter.GetBytes(totalMessageLength);
+            if (BitConverter.IsLittleEndian)
+                Array.Reverse(lengthBytes);
+
+            // Write length prefix
+            await _stream.WriteAsync(lengthBytes, 0, lengthBytes.Length, cancellationToken);
+            
+            // Write payload type
+            await _stream.WriteAsync(payloadTypeBytes, 0, payloadTypeBytes.Length, cancellationToken);
+            
+            // Write payload
+            await _stream.WriteAsync(payload, 0, payload.Length, cancellationToken);
+            
             await _stream.FlushAsync(cancellationToken);
 
-            _logger.LogDebug("Sent message: PayloadType={PayloadType}, Size={Size}", payloadType, messageBytes.Length);
+            _logger.LogDebug("Sent message: PayloadType={PayloadType}, PayloadSize={PayloadSize}, TotalSize={TotalSize}", 
+                payloadType, payload.Length, totalMessageLength + 4);
         }
         finally
         {
@@ -310,15 +327,14 @@ public class CTraderClient : ICTraderClient, IDisposable
 
     private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
     {
-        var buffer = new byte[8192];
-
         try
         {
             while (!cancellationToken.IsCancellationRequested && IsConnected && _stream != null)
             {
-                // Read from TCP stream
-                var bytesRead = await _stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
-
+                // Read message length (4 bytes)
+                var lengthBuffer = new byte[4];
+                var bytesRead = await ReadExactlyAsync(_stream, lengthBuffer, 0, 4, cancellationToken);
+                
                 if (bytesRead == 0)
                 {
                     _logger.LogWarning("TCP connection closed by server");
@@ -326,7 +342,29 @@ public class CTraderClient : ICTraderClient, IDisposable
                     break;
                 }
 
-                await ProcessMessageAsync(buffer, bytesRead);
+                // Convert from big-endian (network byte order)
+                if (BitConverter.IsLittleEndian)
+                    Array.Reverse(lengthBuffer);
+                
+                var messageLength = BitConverter.ToInt32(lengthBuffer, 0);
+                
+                if (messageLength <= 0 || messageLength > 1024 * 1024) // Max 1MB
+                {
+                    _logger.LogError("Invalid message length: {Length}", messageLength);
+                    break;
+                }
+
+                // Read full message
+                var messageBuffer = new byte[messageLength];
+                bytesRead = await ReadExactlyAsync(_stream, messageBuffer, 0, messageLength, cancellationToken);
+                
+                if (bytesRead < messageLength)
+                {
+                    _logger.LogError("Incomplete message received: {Received}/{Expected}", bytesRead, messageLength);
+                    break;
+                }
+
+                await ProcessMessageAsync(messageBuffer, messageLength);
             }
         }
         catch (Exception ex)
@@ -338,16 +376,36 @@ public class CTraderClient : ICTraderClient, IDisposable
         }
     }
 
+    private async Task<int> ReadExactlyAsync(Stream stream, byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+    {
+        int totalRead = 0;
+        while (totalRead < count)
+        {
+            var read = await stream.ReadAsync(buffer, offset + totalRead, count - totalRead, cancellationToken);
+            if (read == 0)
+                return totalRead; // Stream closed
+            
+            totalRead += read;
+        }
+        return totalRead;
+    }
+
     private async Task ProcessMessageAsync(byte[] buffer, int length)
     {
         try
         {
-            // Extract payload type (first 4 bytes)
-            var payloadType = BitConverter.ToInt32(buffer, 0);
+            // Extract payload type (first 4 bytes, big-endian)
+            var payloadTypeBytes = new byte[4];
+            Array.Copy(buffer, 0, payloadTypeBytes, 0, 4);
+
+            if (BitConverter.IsLittleEndian)
+                Array.Reverse(payloadTypeBytes);
+
+            var payloadType = BitConverter.ToInt32(payloadTypeBytes, 0);
 
             // Extract payload (remaining bytes)
-            var payload = new byte[length - sizeof(int)];
-            Array.Copy(buffer, sizeof(int), payload, 0, payload.Length);
+            var payload = new byte[length - 4];
+            Array.Copy(buffer, 4, payload, 0, payload.Length);
 
             _logger.LogDebug("Received message: PayloadType={PayloadType}, Size={Size}", payloadType, length);
 

@@ -12,8 +12,16 @@ public class ProtoOAApplicationAuthReq : IMessage<ProtoOAApplicationAuthReq>
 
     public int CalculateSize()
     {
-        // Simplified calculation
-        return ClientId.Length + ClientSecret.Length + 8;
+        int size = 0;
+        if (ClientId.Length != 0)
+        {
+            size += 1 + CodedOutputStream.ComputeStringSize(ClientId);
+        }
+        if (ClientSecret.Length != 0)
+        {
+            size += 1 + CodedOutputStream.ComputeStringSize(ClientSecret);
+        }
+        return size;
     }
 
     public ProtoOAApplicationAuthReq Clone()
@@ -46,10 +54,12 @@ public class ProtoOAApplicationAuthReq : IMessage<ProtoOAApplicationAuthReq>
     {
         if (ClientId.Length != 0)
         {
+            output.WriteRawTag(10); // Field 1, wire type 2 (length-delimited)
             output.WriteString(ClientId);
         }
         if (ClientSecret.Length != 0)
         {
+            output.WriteRawTag(18); // Field 2, wire type 2 (length-delimited)
             output.WriteString(ClientSecret);
         }
     }
