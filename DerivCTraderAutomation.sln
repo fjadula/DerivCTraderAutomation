@@ -13,6 +13,17 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DerivCTrader.SignalScraper"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DerivCTrader.TradeExecutor", "src\DerivCTrader.TradeExecutor\DerivCTrader.TradeExecutor.csproj", "{A5555555-5555-5555-5555-555555555555}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{B6666666-6666-6666-6666-666666666666}"
+	ProjectSection(SolutionItems) = preProject
+		azure-pipelines.yml = azure-pipelines.yml
+		azure-pipelines-deploy.yml = azure-pipelines-deploy.yml
+		README.md = README.md
+		QUICKSTART.md = QUICKSTART.md
+		ARCHITECTURE.md = ARCHITECTURE.md
+		DEPLOYMENT.md = DEPLOYMENT.md
+		PROJECT_STATUS.md = PROJECT_STATUS.md
+	EndProjectSection
+EndProject
 
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
