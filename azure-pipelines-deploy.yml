@@ -25,6 +25,8 @@ variables:
     value: 'C:\Services\DerivCTraderTradeExecutor'
   - name: vpsServer
     value: '108.181.161.170'
+  - name: deployUser
+    value: 'Administrator'
 
 stages:
 # ================================
@@ -43,6 +45,7 @@ stages:
 
     - task: UseDotNet@2
       displayName: 'Install .NET SDK 8.x'
+      continueOnError: true
       inputs:
         packageType: sdk
         version: $(dotnetVersion)
