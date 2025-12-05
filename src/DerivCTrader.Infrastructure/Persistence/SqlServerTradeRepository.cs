@@ -16,11 +16,132 @@ public class SqlServerTradeRepository : ITradeRepository
     public SqlServerTradeRepository(IConfiguration configuration, ILogger<SqlServerTradeRepository> logger)
     {
         _connectionString = configuration.GetConnectionString("ConnectionString") 
-            ?? throw new InvalidOperationException("Connection string 'DefaultConnection' not found");
+            ?? throw new InvalidOperationException("Connection string 'ConnectionString' not found");
         _logger = logger;
     }
 
     private IDbConnection CreateConnection() => new SqlConnection(_connectionString);
+
+    // ===== SIGNAL QUEUE OPERATIONS =====
+
+    public async Task<int> SaveToQueueAsync(SignalQueue signal)
+    {
+        const string sql = @"
+            INSERT INTO SignalQueue (ProviderChannelId, ProviderName, Asset, Direction, EntryPrice, StopLoss, TakeProfit, 
+                                     SignalType, Status, ReceivedAt, CreatedAt, Timeframe, Pattern, RawMessage)
+            VALUES (@ProviderChannelId, @ProviderName, @Asset, @Direction, @EntryPrice, @StopLoss, @TakeProfit,
+                    @SignalType, @Status, @ReceivedAt, @CreatedAt, @Timeframe, @Pattern, @RawMessage);
+            SELECT CAST(SCOPE_IDENTITY() as int);";
+
+        using var connection = CreateConnection();
+        var signalId = await connection.ExecuteScalarAsync<int>(sql, signal);
+        _logger.LogInformation("Saved signal to queue: SignalId={SignalId}, Asset={Asset}, Direction={Direction}", 
+            signalId, signal.Asset, signal.Direction);
+        return signalId;
+    }
+
+    public async Task<List<SignalQueue>> GetPendingSignalsAsync()
+    {
+        const string sql = "SELECT * FROM SignalQueue WHERE Status = 'Pending' ORDER BY ReceivedAt ASC";
+        using var connection = CreateConnection();
+        var signals = await connection.QueryAsync<SignalQueue>(sql);
+        return signals.ToList();
+    }
+
+    public async Task UpdateSignalStatusAsync(int signalId, string status)
+    {
+        const string sql = @"
+            UPDATE SignalQueue 
+            SET Status = @Status, ProcessedAt = @ProcessedAt 
+            WHERE SignalId = @SignalId";
+
+        using var connection = CreateConnection();
+        await connection.ExecuteAsync(sql, new 
+        { 
+            SignalId = signalId, 
+            Status = status, 
+            ProcessedAt = DateTime.UtcNow 
+        });
+        _logger.LogInformation("Updated signal status: SignalId={SignalId}, Status={Status}", signalId, status);
+    }
+
+    // ===== DERIV TRADES OPERATIONS =====
+
+    public async Task<int> SaveDerivTradeAsync(DerivTrade trade)
+    {
+        const string sql = @"
+            INSERT INTO DerivTrades (ContractId, Asset, Direction, Stake, ExpiryMinutes, EntryPrice, Status, OpenTime,
+                                     StrategyName, Timeframe, Pattern, ProviderChannelId, ProviderName)
+            VALUES (@ContractId, @Asset, @Direction, @Stake, @ExpiryMinutes, @EntryPrice, @Status, @OpenTime,
+                    @StrategyName, @Timeframe, @Pattern, @ProviderChannelId, @ProviderName);
+            SELECT CAST(SCOPE_IDENTITY() as int);";
+
+        using var connection = CreateConnection();
+        var tradeId = await connection.ExecuteScalarAsync<int>(sql, trade);
+        _logger.LogInformation("Saved Deriv trade: TradeId={TradeId}, ContractId={ContractId}", tradeId, trade.ContractId);
+        return tradeId;
+    }
+
+    public async Task<List<DerivTrade>> GetOpenDerivTradesAsync()
+    {
+        const string sql = "SELECT * FROM DerivTrades WHERE Status = 'Open'";
+        using var connection = CreateConnection();
+        var trades = await connection.QueryAsync<DerivTrade>(sql);
+        return trades.ToList();
+    }
+
+    public async Task UpdateDerivTradeOutcomeAsync(int tradeId, string status, decimal profit)
+    {
+        const string sql = @"
+            UPDATE DerivTrades 
+            SET Status = @Status, Profit = @Profit, CloseTime = @CloseTime 
+            WHERE TradeId = @TradeId";
+
+        using var connection = CreateConnection();
+        await connection.ExecuteAsync(sql, new 
+        { 
+            TradeId = tradeId, 
+            Status = status, 
+            Profit = profit, 
+            CloseTime = DateTime.UtcNow 
+        });
+        _logger.LogInformation("Updated Deriv trade outcome: TradeId={TradeId}, Status={Status}, Profit={Profit}", 
+            tradeId, status, profit);
+    }
+
+    public async Task<DerivTrade?> GetDerivTradeByContractIdAsync(string contractId)
+    {
+        const string sql = "SELECT * FROM DerivTrades WHERE ContractId = @ContractId";
+        using var connection = CreateConnection();
+        return await connection.QueryFirstOrDefaultAsync<DerivTrade>(sql, new { ContractId = contractId });
+    }
+
+    // ===== PROVIDER CONFIG =====
+
+    public async Task<ProviderChannelConfig?> GetProviderConfigAsync(string providerChannelId)
+    {
+        const string sql = "SELECT * FROM ProviderChannelConfig WHERE ProviderChannelId = @ProviderChannelId";
+        using var connection = CreateConnection();
+        return await connection.QueryFirstOrDefaultAsync<ProviderChannelConfig>(sql, new { ProviderChannelId = providerChannelId });
+    }
+
+    public async Task<List<ProviderChannelConfig>> GetAllProviderConfigsAsync()
+    {
+        const string sql = "SELECT * FROM ProviderChannelConfig";
+        using var connection = CreateConnection();
+        var configs = await connection.QueryAsync<ProviderChannelConfig>(sql);
+        return configs.ToList();
+    }
+
+    public async Task<List<ProviderChannelConfig>> GetAllActiveProvidersAsync()
+    {
+        const string sql = "SELECT * FROM ProviderChannelConfig WHERE IsActive = 1";
+        using var connection = CreateConnection();
+        var configs = await connection.QueryAsync<ProviderChannelConfig>(sql);
+        return configs.ToList();
+    }
+
+    // ===== EXISTING METHODS (keep unchanged) =====
 
     public async Task<int> CreateForexTradeAsync(ForexTrade trade)
     {
@@ -156,20 +277,5 @@ public class SqlServerTradeRepository : ITradeRepository
         using var connection = CreateConnection();
         await connection.ExecuteAsync(sql, new { QueueId = queueId });
         _logger.LogInformation("Deleted queue item {QueueId}", queueId);
-    }
-
-    public async Task<ProviderChannelConfig?> GetProviderConfigAsync(string providerChannelId)
-    {
-        const string sql = "SELECT * FROM ProviderChannelConfig WHERE ProviderChannelId = @ProviderChannelId";
-        using var connection = CreateConnection();
-        return await connection.QueryFirstOrDefaultAsync<ProviderChannelConfig>(sql, new { ProviderChannelId = providerChannelId });
-    }
-
-    public async Task<List<ProviderChannelConfig>> GetAllProviderConfigsAsync()
-    {
-        const string sql = "SELECT * FROM ProviderChannelConfig";
-        using var connection = CreateConnection();
-        var configs = await connection.QueryAsync<ProviderChannelConfig>(sql);
-        return configs.ToList();
     }
 }

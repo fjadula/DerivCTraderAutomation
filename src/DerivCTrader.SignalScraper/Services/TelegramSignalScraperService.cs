@@ -1,4 +1,5 @@
 ﻿using DerivCTrader.Application.Interfaces;
+using DerivCTrader.Domain.Entities;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -317,7 +318,40 @@ public class TelegramSignalScraperService : BackgroundService
                     Console.WriteLine($"   Take Profit: {parsedSignal.TakeProfit}");
                     Console.WriteLine($"   Stop Loss: {parsedSignal.StopLoss}");
 
-                    // TODO: Send to trade execution pipeline
+                    // 🆕 SAVE TO DATABASE
+                    try
+                    {
+                        Console.WriteLine("💾 Saving signal to database...");
+                        
+                        var queueItem = new SignalQueue
+                        {
+                            ProviderChannelId = parsedSignal.ProviderChannelId,
+                            ProviderName = parsedSignal.ProviderName,
+                            Asset = parsedSignal.Asset,
+                            Direction = parsedSignal.Direction.ToString(),
+                            EntryPrice = parsedSignal.EntryPrice,
+                            StopLoss = parsedSignal.StopLoss,
+                            TakeProfit = parsedSignal.TakeProfit,
+                            SignalType = parsedSignal.SignalType.ToString(),
+                            Status = "Pending",
+                            ReceivedAt = parsedSignal.ReceivedAt,
+                            CreatedAt = DateTime.UtcNow,
+                            Timeframe = parsedSignal.Timeframe,
+                            Pattern = parsedSignal.Pattern,
+                            RawMessage = parsedSignal.RawMessage
+                        };
+                        
+                        var signalId = await _repository.SaveToQueueAsync(queueItem);
+                        
+                        _logger.LogInformation("💾 Signal saved to database: ID={SignalId}", signalId);
+                        Console.WriteLine($"💾 SAVED TO QUEUE: Signal #{signalId}");
+                        Console.WriteLine("========================================\n");
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed to save signal to database");
+                        Console.WriteLine($"❌ DATABASE SAVE FAILED: {ex.Message}");
+                    }
                 }
                 else
                 {

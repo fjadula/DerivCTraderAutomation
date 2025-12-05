@@ -1,13 +1,14 @@
 ﻿using DerivCTrader.Application.Interfaces;
-using DerivCTrader.Application.Parsers;
+using DerivCTrader.Application.Services;
+using DerivCTrader.Infrastructure.Database;
+using DerivCTrader.Infrastructure.Deriv;
+using DerivCTrader.Infrastructure.Deriv.Models;
 using DerivCTrader.Infrastructure.ExpiryCalculation;
-using DerivCTrader.Infrastructure.Persistence;
-using DerivCTrader.Infrastructure.Trading;
+using DerivCTrader.TradeExecutor.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Serilog;
-using Serilog.Settings.Configuration;
 
 namespace DerivCTrader.TradeExecutor;
 
@@ -15,22 +16,24 @@ class Program
 {
     static async Task Main(string[] args)
     {
-        // Build configuration - prioritize Production file if it exists
+        Console.WriteLine("========================================");
+        Console.WriteLine("  DERIVCTRADER TRADE EXECUTOR");
+        Console.WriteLine("========================================\n");
+
+        // Load configuration
         var configBuilder = new ConfigurationBuilder()
             .SetBasePath(Directory.GetCurrentDirectory());
 
-        // Try Production file first (your actual credentials)
         var productionFile = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.Production.json");
         if (File.Exists(productionFile))
         {
             configBuilder.AddJsonFile("appsettings.Production.json", optional: false, reloadOnChange: true);
-            Log.Information("Using appsettings.Production.json");
+            Console.WriteLine("✅ Using appsettings.Production.json");
         }
         else
         {
-            // Fallback to base file
             configBuilder.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
-            Log.Information("Using appsettings.json");
+            Console.WriteLine("✅ Using appsettings.json");
         }
 
         var configuration = configBuilder.Build();
@@ -48,34 +51,53 @@ class Program
                 .UseSerilog()
                 .ConfigureServices((context, services) =>
                 {
-                    // Register configuration
+                    // Configuration
                     services.AddSingleton<IConfiguration>(configuration);
 
-                    // Register repositories
+                    // Deriv configuration
+                    var derivConfig = new DerivConfig();
+                    configuration.GetSection("Deriv").Bind(derivConfig);
+                    services.AddSingleton(derivConfig);
+
+                    // Database
                     services.AddSingleton<ITradeRepository, SqlServerTradeRepository>();
 
-                    // Register clients
-                    services.AddSingleton<IDerivClient, DerivWebSocketClient>();
-                    // TODO: Add ICTraderClient when implemented
-                    // services.AddSingleton<ICTraderClient, CTraderWebSocketClient>();
+                    // Deriv client
+                    services.AddSingleton<IDerivClient, DerivClient>();
 
-                    // Register services
-                    services.AddSingleton<BinaryExpiryCalculator>();
+                    // Binary expiry calculator
+                    services.AddSingleton<IBinaryExpiryCalculator, BinaryExpiryCalculator>();
 
-                    // TODO: Register background services when ready
-                    // services.AddHostedService<CTraderMonitorService>();
-                    // services.AddHostedService<BinaryExecutionService>();
-                    // services.AddHostedService<QueueMatchingService>();
+                    // Background services
+                    services.AddHostedService<BinaryExecutionService>();
+                    services.AddHostedService<OutcomeMonitorService>();
 
-                    Log.Information("Trade Executor configured. Background services will be added as they're implemented.");
+                    Log.Information("Services registered successfully");
                 })
                 .Build();
 
+            Console.WriteLine("\n========================================");
+            Console.WriteLine("  SERVICES REGISTERED");
+            Console.WriteLine("========================================");
+            Console.WriteLine("✅ Database Repository");
+            Console.WriteLine("✅ Deriv WebSocket Client");
+            Console.WriteLine("✅ Binary Execution Service");
+            Console.WriteLine("✅ Outcome Monitor Service");
+            Console.WriteLine("========================================\n");
+
+            Log.Information("Host built successfully, starting services...");
+
             await host.RunAsync();
+
+            Console.WriteLine("\n=== HOST STOPPED ===");
         }
         catch (Exception ex)
         {
-            Log.Fatal(ex, "Trade Executor terminated unexpectedly");
+            Console.WriteLine($"\n=== FATAL ERROR: {ex.Message} ===");
+            Console.WriteLine(ex.StackTrace);
+            Log.Fatal(ex, "Application terminated unexpectedly");
+            Console.WriteLine("\nPress any key to exit...");
+            Console.ReadKey();
         }
         finally
         {
