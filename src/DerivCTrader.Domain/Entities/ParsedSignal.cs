@@ -4,6 +4,7 @@ namespace DerivCTrader.Domain.Entities;
 
 public class ParsedSignal
 {
+    public int SignalId { get; set; }  // Add this if missing
     public string Asset { get; set; } = string.Empty;
     public TradeDirection Direction { get; set; }
     public decimal? EntryPrice { get; set; }
@@ -21,4 +22,6 @@ public class ParsedSignal
     public string? RawMessage { get; set; }
     public string? Pattern { get; set; }  // For ChartSense: "Rising wedge", "Wedge", etc.
     public string? Timeframe { get; set; }  // e.g., "H4", "1H", "15M"
+    public bool Processed { get; set; } = false;  // Add this
+    public DateTime? ProcessedAt { get; set; }  // Add this
 }

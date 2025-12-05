@@ -321,31 +321,10 @@ public class TelegramSignalScraperService : BackgroundService
                     // 🆕 SAVE TO DATABASE
                     try
                     {
-                        Console.WriteLine("💾 Saving signal to database...");
+                        var signalId = await _repository.SaveParsedSignalAsync(parsedSignal);
                         
-                        var queueItem = new SignalQueue
-                        {
-                            ProviderChannelId = parsedSignal.ProviderChannelId,
-                            ProviderName = parsedSignal.ProviderName,
-                            Asset = parsedSignal.Asset,
-                            Direction = parsedSignal.Direction.ToString(),
-                            EntryPrice = parsedSignal.EntryPrice,
-                            StopLoss = parsedSignal.StopLoss,
-                            TakeProfit = parsedSignal.TakeProfit,
-                            SignalType = parsedSignal.SignalType.ToString(),
-                            Status = "Pending",
-                            ReceivedAt = parsedSignal.ReceivedAt,
-                            CreatedAt = DateTime.UtcNow,
-                            Timeframe = parsedSignal.Timeframe,
-                            Pattern = parsedSignal.Pattern,
-                            RawMessage = parsedSignal.RawMessage
-                        };
-                        
-                        var signalId = await _repository.SaveToQueueAsync(queueItem);
-                        
-                        _logger.LogInformation("💾 Signal saved to database: ID={SignalId}", signalId);
+                        _logger.LogInformation("💾 Signal saved to queue: SignalId={SignalId}", signalId);
                         Console.WriteLine($"💾 SAVED TO QUEUE: Signal #{signalId}");
-                        Console.WriteLine("========================================\n");
                     }
                     catch (Exception ex)
                     {

@@ -1,5 +1,4 @@
 ﻿using DerivCTrader.Application.Interfaces;
-using DerivCTrader.Application.Services;
 using DerivCTrader.Infrastructure.Database;
 using DerivCTrader.Infrastructure.Deriv;
 using DerivCTrader.Infrastructure.Deriv.Models;
@@ -68,7 +67,7 @@ class Program
                     // Binary expiry calculator
                     services.AddSingleton<IBinaryExpiryCalculator, BinaryExpiryCalculator>();
 
-                    // Background services
+                    // Register background services
                     services.AddHostedService<BinaryExecutionService>();
                     services.AddHostedService<OutcomeMonitorService>();
 

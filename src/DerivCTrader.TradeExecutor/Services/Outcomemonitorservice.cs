@@ -1,139 +1,111 @@
 ﻿using DerivCTrader.Application.Interfaces;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace DerivCTrader.TradeExecutor.Services;
 
 /// <summary>
-/// Background service that monitors open Deriv trades and updates outcomes after expiry
+/// Monitors open Deriv trades and updates outcomes after expiry
 /// </summary>
 public class OutcomeMonitorService : BackgroundService
 {
-    private readonly IDerivClient _derivClient;
-    private readonly ITradeRepository _repository;
     private readonly ILogger<OutcomeMonitorService> _logger;
+    private readonly ITradeRepository _repository;
+    private readonly IDerivClient _derivClient;
+    private readonly int _checkIntervalSeconds;
 
     public OutcomeMonitorService(
-        IDerivClient derivClient,
+        ILogger<OutcomeMonitorService> logger,
         ITradeRepository repository,
-        ILogger<OutcomeMonitorService> logger)
+        IDerivClient derivClient,
+        IConfiguration configuration)
     {
-        _derivClient = derivClient;
-        _repository = repository;
         _logger = logger;
+        _repository = repository;
+        _derivClient = derivClient;
+        
+        _checkIntervalSeconds = int.Parse(configuration["OutcomeMonitor:CheckIntervalSeconds"] ?? "30");
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("Outcome Monitor Service starting...");
+        _logger.LogInformation("=== OUTCOME MONITOR SERVICE STARTING ===");
         Console.WriteLine("=== OUTCOME MONITOR SERVICE STARTING ===");
 
-        // Wait a bit for BinaryExecutionService to connect first
-        await Task.Delay(5000, stoppingToken);
+        // Wait for Deriv client to connect
+        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
 
-        try
-        {
-            while (!stoppingToken.IsCancellationRequested)
-            {
-                try
-                {
-                    await CheckOpenTradesAsync(stoppingToken);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error checking trades");
-                }
-
-                // Check every 10 seconds
-                await Task.Delay(10000, stoppingToken);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            _logger.LogInformation("Outcome Monitor Service stopping...");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Fatal error in Outcome Monitor Service");
-        }
-        finally
-        {
-            _logger.LogInformation("Outcome Monitor Service stopped");
-        }
-    }
-
-    private async Task CheckOpenTradesAsync(CancellationToken cancellationToken)
-    {
-        var openTrades = await _repository.GetOpenDerivTradesAsync();
-
-        if (openTrades.Count == 0)
-            return;
-
-        _logger.LogDebug("Checking {Count} open trades", openTrades.Count);
-
-        foreach (var trade in openTrades)
+        while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                // Calculate expiry time
-                var expiryTime = trade.PurchasedAt.AddMinutes(trade.Expiry);
-
-                // Check if trade has expired
-                if (DateTime.UtcNow < expiryTime)
-                {
-                    var remaining = (expiryTime - DateTime.UtcNow).TotalSeconds;
-                    _logger.LogDebug("Trade {ContractId} expires in {Seconds}s",
-                        trade.ContractId, (int)remaining);
-                    continue;
-                }
-
-                // Trade has expired - get outcome
-                _logger.LogInformation("⏰ Trade {ContractId} expired, checking outcome...",
-                    trade.ContractId);
-
-                var outcome = await _derivClient.GetContractOutcomeAsync(
-                    trade.ContractId,
-                    cancellationToken);
-
-                // Update database
-                await _repository.UpdateDerivTradeOutcomeAsync(
-                    trade.TradeId,
-                    outcome.Status,
-                    outcome.Profit);
-
-                // Log result
-                var emoji = outcome.Status == "Win" ? "🎉" : "😞";
-                _logger.LogInformation("{Emoji} Trade {ContractId} settled: {Status} {Profit:C}",
-                    emoji, trade.ContractId, outcome.Status, outcome.Profit);
-
-                Console.WriteLine($"{emoji} TRADE SETTLED: {trade.Asset} {trade.Direction} " +
-                                $"{outcome.Status} ${outcome.Profit:F2}");
-
-                // Calculate and display statistics
-                await DisplayStatisticsAsync();
+                await CheckPendingTradesAsync(stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(_checkIntervalSeconds), stoppingToken);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to check trade {ContractId}", trade.ContractId);
+                _logger.LogError(ex, "Error in outcome monitor loop");
+                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
             }
         }
+
+        _logger.LogInformation("=== OUTCOME MONITOR SERVICE STOPPED ===");
     }
 
-    private async Task DisplayStatisticsAsync()
+    private async Task CheckPendingTradesAsync(CancellationToken cancellationToken)
     {
-        try
+        var pendingTrades = await _repository.GetPendingDerivTradesAsync();
+
+        if (pendingTrades.Count == 0)
+            return;
+
+        _logger.LogDebug("Checking {Count} pending Deriv trades", pendingTrades.Count);
+
+        foreach (var trade in pendingTrades)
         {
-            // Get all settled trades (you could add repository method for this)
-            // For now, just get balance
-            if (_derivClient.IsConnected && _derivClient.IsAuthorized)
+            try
             {
-                var balance = await _derivClient.GetBalanceAsync();
-                _logger.LogInformation("💰 Current Balance: ${Balance}", balance);
+                // Check if expired
+                var expiryTime = trade.CreatedAt.AddMinutes(trade.ExpiryMinutes ?? 21);
+                
+                if (DateTime.UtcNow < expiryTime)
+                    continue;
+
+                // Get outcome from Deriv
+                if (string.IsNullOrEmpty(trade.DerivContractId))
+                    continue;
+
+                var outcome = await _derivClient.GetContractOutcomeAsync(trade.DerivContractId, cancellationToken);
+
+                if (outcome == null)
+                {
+                    _logger.LogWarning("Could not get outcome for contract {ContractId}", trade.DerivContractId);
+                    continue;
+                }
+
+                // Update in database
+                await _repository.UpdateDerivTradeOutcomeAsync(
+                    trade.QueueId,
+                    outcome.Status,
+                    outcome.Profit);
+
+                _logger.LogInformation("🎉 TRADE SETTLED: {Asset} {Direction} {Status} ${Profit}",
+                    trade.Asset, trade.Direction, outcome.Status, outcome.Profit);
+                Console.WriteLine($"🎉 SETTLED: {trade.Asset} {trade.Direction} {outcome.Status} ${outcome.Profit}");
+
+                // Log balance
+                try
+                {
+                    var balance = await _derivClient.GetBalanceAsync(cancellationToken);
+                    Console.WriteLine($"💰 Balance: ${balance}");
+                }
+                catch { }
             }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Failed to get statistics");
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to check outcome for trade {QueueId}", trade.QueueId);
+            }
         }
     }
 }

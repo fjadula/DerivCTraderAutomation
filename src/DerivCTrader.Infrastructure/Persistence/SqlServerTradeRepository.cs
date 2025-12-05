@@ -278,4 +278,101 @@ public class SqlServerTradeRepository : ITradeRepository
         await connection.ExecuteAsync(sql, new { QueueId = queueId });
         _logger.LogInformation("Deleted queue item {QueueId}", queueId);
     }
+
+    // ===== PARSED SIGNALS OPERATIONS =====
+
+    public async Task<int> SaveParsedSignalAsync(ParsedSignal signal)
+    {
+        const string sql = @"
+            INSERT INTO ParsedSignalsQueue (Asset, Direction, EntryPrice, StopLoss, TakeProfit, 
+                                             ProviderChannelId, ProviderName, SignalType, ReceivedAt, 
+                                             Processed, Timeframe, Pattern, RawMessage)
+            VALUES (@Asset, @Direction, @EntryPrice, @StopLoss, @TakeProfit,
+                    @ProviderChannelId, @ProviderName, @SignalType, @ReceivedAt,
+                    @Processed, @Timeframe, @Pattern, @RawMessage);
+            SELECT CAST(SCOPE_IDENTITY() as int);";
+
+        using var connection = CreateConnection();
+        var signalId = await connection.ExecuteScalarAsync<int>(sql, new
+        {
+            signal.Asset,
+            Direction = signal.Direction.ToString(),
+            signal.EntryPrice,
+            signal.StopLoss,
+            signal.TakeProfit,
+            signal.ProviderChannelId,
+            signal.ProviderName,
+            SignalType = signal.SignalType.ToString(),
+            signal.ReceivedAt,
+            Processed = false,
+            signal.Timeframe,
+            signal.Pattern,
+            signal.RawMessage
+        });
+        
+        _logger.LogInformation("Saved parsed signal: SignalId={SignalId}, Asset={Asset}", signalId, signal.Asset);
+        return signalId;
+    }
+
+    public async Task<List<ParsedSignal>> GetUnprocessedSignalsAsync()
+    {
+        const string sql = @"
+            SELECT * FROM ParsedSignalsQueue 
+            WHERE Processed = 0 
+            ORDER BY ReceivedAt ASC";
+        
+        using var connection = CreateConnection();
+        var signals = await connection.QueryAsync<ParsedSignal>(sql);
+        return signals.ToList();
+    }
+
+    public async Task MarkSignalAsProcessedAsync(int signalId)
+    {
+        const string sql = @"
+            UPDATE ParsedSignalsQueue 
+            SET Processed = 1, ProcessedAt = @ProcessedAt 
+            WHERE SignalId = @SignalId";
+
+        using var connection = CreateConnection();
+        await connection.ExecuteAsync(sql, new { SignalId = signalId, ProcessedAt = DateTime.UtcNow });
+        _logger.LogInformation("Marked signal as processed: SignalId={SignalId}", signalId);
+    }
+
+    // ===== DERIV TRADE QUEUE OPERATIONS =====
+
+    public async Task<List<TradeExecutionQueue>> GetPendingDerivTradesAsync()
+    {
+        const string sql = @"
+            SELECT * FROM TradeExecutionQueue 
+            WHERE Platform = 'Deriv' 
+              AND Outcome IS NULL
+              AND SettledAt IS NULL
+            ORDER BY CreatedAt ASC";
+
+        using var connection = CreateConnection();
+        var trades = await connection.QueryAsync<TradeExecutionQueue>(sql);
+        return trades.ToList();
+    }
+
+    public async Task UpdateDerivTradeQueueOutcomeAsync(int queueId, string outcome, decimal profit)
+    {
+        const string sql = @"
+            UPDATE TradeExecutionQueue 
+            SET Outcome = @Outcome, 
+                Profit = @Profit, 
+                SettledAt = @SettledAt 
+            WHERE QueueId = @QueueId";
+
+        using var connection = CreateConnection();
+        await connection.ExecuteAsync(sql, new 
+        { 
+            QueueId = queueId, 
+            Outcome = outcome, 
+            Profit = profit, 
+            SettledAt = DateTime.UtcNow 
+        });
+        
+        _logger.LogInformation("Updated Deriv trade outcome: QueueId={QueueId}, Outcome={Outcome}, Profit={Profit}", 
+            queueId, outcome, profit);
+    }
 }
