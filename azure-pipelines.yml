@@ -69,6 +69,30 @@ stages:
             Write-Error "Publish folder not found: $publishFolder"
             exit 1
           }
+          
+          # CRITICAL: Verify appsettings.Production.json was copied
+          Write-Host "`n=== CHECKING FOR CONFIG FILES ===" -ForegroundColor Cyan
+          Write-Host "Looking in: $publishFolder"
+          
+          if (Test-Path "$publishFolder\appsettings.Production.json") {
+            Write-Host "✅ appsettings.Production.json EXISTS" -ForegroundColor Green
+          } else {
+            Write-Host "❌ appsettings.Production.json MISSING!" -ForegroundColor Red
+            Write-Host "`nFiles in publish folder:"
+            Get-ChildItem $publishFolder | Select-Object Name, Length | Format-Table
+            
+            Write-Host "`nChecking source project folder:"
+            $sourceConfig = "$(Build.SourcesDirectory)\src\DerivCTrader.SignalScraper\appsettings.Production.json"
+            if (Test-Path $sourceConfig) {
+              Write-Host "✅ Config file EXISTS in source: $sourceConfig" -ForegroundColor Yellow
+              Write-Host "⚠️ But it's NOT being copied to publish folder!" -ForegroundColor Red
+              Write-Host "`nCheck your .csproj file for:"
+              Write-Host "  <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>"
+            } else {
+              Write-Host "❌ Config file MISSING from source: $sourceConfig" -ForegroundColor Red
+            }
+            exit 1
+          }
 
     # -----------------------------
     # Publish TradeExecutor Service
@@ -91,6 +115,30 @@ stages:
             Write-Error "Publish folder not found: $publishFolder"
             exit 1
           }
+          
+          # CRITICAL: Verify appsettings.Production.json was copied
+          Write-Host "`n=== CHECKING FOR CONFIG FILES ===" -ForegroundColor Cyan
+          Write-Host "Looking in: $publishFolder"
+          
+          if (Test-Path "$publishFolder\appsettings.Production.json") {
+            Write-Host "✅ appsettings.Production.json EXISTS" -ForegroundColor Green
+          } else {
+            Write-Host "❌ appsettings.Production.json MISSING!" -ForegroundColor Red
+            Write-Host "`nFiles in publish folder:"
+            Get-ChildItem $publishFolder | Select-Object Name, Length | Format-Table
+            
+            Write-Host "`nChecking source project folder:"
+            $sourceConfig = "$(Build.SourcesDirectory)\src\DerivCTrader.TradeExecutor\appsettings.Production.json"
+            if (Test-Path $sourceConfig) {
+              Write-Host "✅ Config file EXISTS in source: $sourceConfig" -ForegroundColor Yellow
+              Write-Host "⚠️ But it's NOT being copied to publish folder!" -ForegroundColor Red
+              Write-Host "`nCheck your .csproj file for:"
+              Write-Host "  <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>"
+            } else {
+              Write-Host "❌ Config file MISSING from source: $sourceConfig" -ForegroundColor Red
+            }
+            exit 1
+          }
 
     # -----------------------------
     # Verify Build Output
@@ -102,11 +150,29 @@ stages:
         script: |
           $artifactPath = "$(Build.ArtifactStagingDirectory)\signalscraper"
           
+          # Check DLL
           $dllPath = Get-ChildItem -Path $artifactPath -Filter "DerivCTrader.SignalScraper.dll" -Recurse | Select-Object -First 1
           if ($dllPath) {
             Write-Host "✅ DLL found: $($dllPath.FullName)" -ForegroundColor Green
           } else {
             Write-Error "❌ DerivCTrader.SignalScraper.dll not found"
+            exit 1
+          }
+          
+          # Check appsettings.json
+          if (Test-Path "$artifactPath\appsettings.json") {
+            Write-Host "✅ appsettings.json found" -ForegroundColor Green
+          } else {
+            Write-Warning "⚠️ appsettings.json not found"
+          }
+          
+          # Check appsettings.Production.json
+          if (Test-Path "$artifactPath\appsettings.Production.json") {
+            Write-Host "✅ appsettings.Production.json found" -ForegroundColor Green
+          } else {
+            Write-Error "❌ appsettings.Production.json NOT FOUND - Service will fail to start!"
+            Write-Host "Files in artifact:"
+            Get-ChildItem $artifactPath | Select-Object Name
             exit 1
           }
 
@@ -117,11 +183,29 @@ stages:
         script: |
           $artifactPath = "$(Build.ArtifactStagingDirectory)\tradeexecutor"
           
+          # Check DLL
           $dllPath = Get-ChildItem -Path $artifactPath -Filter "DerivCTrader.TradeExecutor.dll" -Recurse | Select-Object -First 1
           if ($dllPath) {
             Write-Host "✅ DLL found: $($dllPath.FullName)" -ForegroundColor Green
           } else {
             Write-Error "❌ DerivCTrader.TradeExecutor.dll not found"
+            exit 1
+          }
+          
+          # Check appsettings.json
+          if (Test-Path "$artifactPath\appsettings.json") {
+            Write-Host "✅ appsettings.json found" -ForegroundColor Green
+          } else {
+            Write-Warning "⚠️ appsettings.json not found"
+          }
+          
+          # Check appsettings.Production.json
+          if (Test-Path "$artifactPath\appsettings.Production.json") {
+            Write-Host "✅ appsettings.Production.json found" -ForegroundColor Green
+          } else {
+            Write-Error "❌ appsettings.Production.json NOT FOUND - Service will fail to start!"
+            Write-Host "Files in artifact:"
+            Get-ChildItem $artifactPath | Select-Object Name
             exit 1
           }
 
