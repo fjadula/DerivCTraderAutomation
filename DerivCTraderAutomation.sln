@@ -15,7 +15,6 @@ EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{B6666666-6666-6666-6666-666666666666}"
 	ProjectSection(SolutionItems) = preProject
 		ARCHITECTURE.md = ARCHITECTURE.md
-		azure-pipelines-deploy.yml = azure-pipelines-deploy.yml
 		DEPLOYMENT.md = DEPLOYMENT.md
 		PROJECT_STATUS.md = PROJECT_STATUS.md
 		QUICKSTART.md = QUICKSTART.md
