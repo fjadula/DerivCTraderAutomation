@@ -510,9 +510,16 @@ stages:
           $url = "https://api.telegram.org/bot$(TELEGRAM_BOT_TOKEN)/sendMessage"
           $body = @{ chat_id = "$(TELEGRAM_CHAT_ID)"; text = $message; parse_mode = "Markdown" } | ConvertTo-Json
           
-          try {
-            Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json; charset=utf-8" -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
-            Write-Host "✅ Notification sent"
-          } catch {
-            Write-Warning "Notification failed"
+          if ($deployResult -eq "Skipped") {
+            Write-Host "`n❌ DEPLOY WAS SKIPPED" -ForegroundColor Red
+            Write-Host "`nPossible reasons:" -ForegroundColor Yellow
+            Write-Host "1. Environment 'VPS-Production' doesn't exist in project: $(System.TeamProject)"
+            Write-Host "2. Environment requires approval and wasn't approved"
+            Write-Host "3. Pipeline doesn't have permission to use environment"
+            Write-Host "4. Branch protection rules are blocking deployment"
+            Write-Host "`nTo check: Go to Pipelines → Environments → VPS-Production"
+          } else {
+            Write-Host "`n✅ DEPLOY RAN SUCCESSFULLY" -ForegroundColor Green
+            Write-Host "Environment is configured correctly!"
           }
+          Write-Host "=" * 80
