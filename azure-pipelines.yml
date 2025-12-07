@@ -387,20 +387,32 @@ stages:
                       Write-Host "Creating new service..."
                       New-Service -Name $svc -BinaryPathName $binaryPath -DisplayName "Deriv cTrader Signal Scraper" -StartupType Automatic | Out-Null
                     }
+                    
+                    # CRITICAL: Increase service timeout to 3 minutes (default is 30 seconds)
+                    Write-Host "Setting service timeout to 180 seconds..."
+                    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$svc" -Name "ServicesPipeTimeout" -Value 180000 -Type DWord -ErrorAction SilentlyContinue
 
                     Write-Host "Attempting to start service..."
                     try {
                       Start-Service -Name $svc -ErrorAction Stop
-                      Start-Sleep -Seconds 5
                       
-                      $status = (Get-Service -Name $svc).Status
-                      if ($status -eq 'Running') {
-                        Write-Host "✅ Service running"
-                        return @{ Success = $true; Status = $status }
-                      } else {
-                        Write-Host "⚠️ Service status: $status"
-                        return @{ Success = $false; Status = $status; Error = "Service not running after 5 seconds" }
+                      # Wait longer for service to start (up to 2 minutes)
+                      $timeout = 120
+                      $elapsed = 0
+                      while ($elapsed -lt $timeout) {
+                        Start-Sleep -Seconds 5
+                        $elapsed += 5
+                        $status = (Get-Service -Name $svc).Status
+                        Write-Host "[$elapsed s] Service status: $status"
+                        
+                        if ($status -eq 'Running') {
+                          Write-Host "✅ Service running after $elapsed seconds"
+                          return @{ Success = $true; Status = $status }
+                        }
                       }
+                      
+                      Write-Host "⚠️ Service status after $timeout seconds: $status"
+                      return @{ Success = $false; Status = $status; Error = "Service not running after $timeout seconds" }
                     } catch {
                       Write-Host "❌ Service failed to start: $_"
                       return @{ Success = $false; Status = "Stopped"; Error = $_.Exception.Message }
@@ -486,20 +498,32 @@ stages:
                       Write-Host "Creating new service..."
                       New-Service -Name $svc -BinaryPathName $binaryPath -DisplayName "Deriv cTrader Trade Executor" -StartupType Automatic | Out-Null
                     }
+                    
+                    # CRITICAL: Increase service timeout to 3 minutes (default is 30 seconds)
+                    Write-Host "Setting service timeout to 180 seconds..."
+                    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$svc" -Name "ServicesPipeTimeout" -Value 180000 -Type DWord -ErrorAction SilentlyContinue
 
                     Write-Host "Attempting to start service..."
                     try {
                       Start-Service -Name $svc -ErrorAction Stop
-                      Start-Sleep -Seconds 5
                       
-                      $status = (Get-Service -Name $svc).Status
-                      if ($status -eq 'Running') {
-                        Write-Host "✅ Service running"
-                        return @{ Success = $true; Status = $status }
-                      } else {
-                        Write-Host "⚠️ Service status: $status"
-                        return @{ Success = $false; Status = $status; Error = "Service not running after 5 seconds" }
+                      # Wait longer for service to start (up to 2 minutes)
+                      $timeout = 120
+                      $elapsed = 0
+                      while ($elapsed -lt $timeout) {
+                        Start-Sleep -Seconds 5
+                        $elapsed += 5
+                        $status = (Get-Service -Name $svc).Status
+                        Write-Host "[$elapsed s] Service status: $status"
+                        
+                        if ($status -eq 'Running') {
+                          Write-Host "✅ Service running after $elapsed seconds"
+                          return @{ Success = $true; Status = $status }
+                        }
                       }
+                      
+                      Write-Host "⚠️ Service status after $timeout seconds: $status"
+                      return @{ Success = $false; Status = $status; Error = "Service not running after $timeout seconds" }
                     } catch {
                       Write-Host "❌ Service failed to start: $_"
                       return @{ Success = $false; Status = "Stopped"; Error = $_.Exception.Message }
