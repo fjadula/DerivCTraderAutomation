@@ -26,6 +26,7 @@
   <ItemGroup>
     <None Update="appsettings.Production.json">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+	  <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </None>
     <None Update="*.session">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
