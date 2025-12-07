@@ -14,7 +14,7 @@ public class SqlServerTradeRepository : ITradeRepository
 
     public SqlServerTradeRepository(IConfiguration configuration, ILogger<SqlServerTradeRepository> logger)
     {
-        _connectionString = configuration.GetConnectionString("DefaultConnection")
+        _connectionString = configuration.GetConnectionString("ConnectionString")
             ?? throw new ArgumentNullException("Connection string not found");
         _logger = logger;
     }
