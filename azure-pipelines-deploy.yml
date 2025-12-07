@@ -1,5 +1,7 @@
 # ========================================================
-# DEBUG PIPELINE - Shows Exact Stage Status
+# Azure DevOps Pipeline for DerivCTraderAutomation
+# Windows Service Deployment
+# FIXED - Matches KhulaFxTradeMonitor Authentication
 # ========================================================
 
 trigger:
@@ -10,58 +12,145 @@ trigger:
 
 variables:
   - group: Deployment-Secrets
+  - name: buildConfiguration
+    value: 'Release'
+  - name: dotnetVersion
+    value: '8.x'
+  - name: serviceNameScraper
+    value: 'DerivCTraderSignalScraper'
+  - name: serviceNameExecutor
+    value: 'DerivCTraderTradeExecutor'
+  - name: deployPathScraper
+    value: 'C:\Services\DerivCTraderSignalScraper'
+  - name: deployPathExecutor
+    value: 'C:\Services\DerivCTraderTradeExecutor'
+  - name: vpsServer
+    value: '108.181.161.170'
 
 stages:
 # ================================
-# STAGE 1: Build
+# BUILD STAGE
 # ================================
 - stage: Build
-  displayName: 'Build Stage'
+  displayName: 'Build DerivCTrader Services'
   jobs:
   - job: BuildJob
-    displayName: 'Build Job'
+    displayName: 'Build Applications'
     pool:
       name: 'Default'
     steps:
+    - checkout: self
+      fetchDepth: 1
+
+    - task: UseDotNet@2
+      displayName: 'Install .NET SDK 8.x'
+      inputs:
+        packageType: sdk
+        version: $(dotnetVersion)
+
+    # -----------------------------
+    # Publish SignalScraper Service
+    # -----------------------------
     - task: PowerShell@2
-      displayName: 'Show Build Info'
+      displayName: 'Publish SignalScraper Service'
       inputs:
         targetType: inline
         script: |
-          Write-Host "=" * 80
-          Write-Host "BUILD STAGE INFO" -ForegroundColor Cyan
-          Write-Host "=" * 80
-          Write-Host "Project: $(System.TeamProject)"
-          Write-Host "Repository: $(Build.Repository.Name)"
-          Write-Host "Branch: $(Build.SourceBranch)"
-          Write-Host "Build ID: $(Build.BuildId)"
-          Write-Host "Agent Name: $(Agent.Name)"
-          Write-Host "Agent Pool: Default"
-          Write-Host "=" * 80
-          
-          # Create dummy artifact
-          $path = "$(Build.ArtifactStagingDirectory)\dummy"
-          New-Item -ItemType Directory -Path $path -Force | Out-Null
-          "test" | Out-File "$path\test.txt"
-          Write-Host "✅ Dummy artifact created"
-    
-    - task: PublishBuildArtifacts@1
-      displayName: 'Publish Dummy Artifact'
+          $publishFolder = "$(Build.ArtifactStagingDirectory)\signalscraper"
+          Write-Host "Publishing SignalScraper to $publishFolder"
+
+          dotnet publish "$(Build.SourcesDirectory)\src\DerivCTrader.SignalScraper\DerivCTrader.SignalScraper.csproj" `
+            -c $(buildConfiguration) `
+            -r win-x64 `
+            --self-contained true `
+            -o "$publishFolder"
+
+          if (!(Test-Path $publishFolder)) {
+            Write-Error "Publish folder not found: $publishFolder"
+            exit 1
+          }
+
+    # -----------------------------
+    # Publish TradeExecutor Service
+    # -----------------------------
+    - task: PowerShell@2
+      displayName: 'Publish TradeExecutor Service'
       inputs:
-        pathToPublish: '$(Build.ArtifactStagingDirectory)/dummy'
-        artifactName: 'dummy'
+        targetType: inline
+        script: |
+          $publishFolder = "$(Build.ArtifactStagingDirectory)\tradeexecutor"
+          Write-Host "Publishing TradeExecutor to $publishFolder"
+
+          dotnet publish "$(Build.SourcesDirectory)\src\DerivCTrader.TradeExecutor\DerivCTrader.TradeExecutor.csproj" `
+            -c $(buildConfiguration) `
+            -r win-x64 `
+            --self-contained true `
+            -o "$publishFolder"
+
+          if (!(Test-Path $publishFolder)) {
+            Write-Error "Publish folder not found: $publishFolder"
+            exit 1
+          }
+
+    # -----------------------------
+    # Verify Build Output
+    # -----------------------------
+    - task: PowerShell@2
+      displayName: 'Verify SignalScraper Build'
+      inputs:
+        targetType: inline
+        script: |
+          $artifactPath = "$(Build.ArtifactStagingDirectory)\signalscraper"
+          
+          $dllPath = Get-ChildItem -Path $artifactPath -Filter "DerivCTrader.SignalScraper.dll" -Recurse | Select-Object -First 1
+          if ($dllPath) {
+            Write-Host "✅ DLL found: $($dllPath.FullName)" -ForegroundColor Green
+          } else {
+            Write-Error "❌ DerivCTrader.SignalScraper.dll not found"
+            exit 1
+          }
+
+    - task: PowerShell@2
+      displayName: 'Verify TradeExecutor Build'
+      inputs:
+        targetType: inline
+        script: |
+          $artifactPath = "$(Build.ArtifactStagingDirectory)\tradeexecutor"
+          
+          $dllPath = Get-ChildItem -Path $artifactPath -Filter "DerivCTrader.TradeExecutor.dll" -Recurse | Select-Object -First 1
+          if ($dllPath) {
+            Write-Host "✅ DLL found: $($dllPath.FullName)" -ForegroundColor Green
+          } else {
+            Write-Error "❌ DerivCTrader.TradeExecutor.dll not found"
+            exit 1
+          }
+
+    # -----------------------------
+    # Publish Artifacts
+    # -----------------------------
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish SignalScraper Artifact'
+      inputs:
+        pathToPublish: '$(Build.ArtifactStagingDirectory)/signalscraper'
+        artifactName: 'signalscraper'
+        publishLocation: 'Container'
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish TradeExecutor Artifact'
+      inputs:
+        pathToPublish: '$(Build.ArtifactStagingDirectory)/tradeexecutor'
+        artifactName: 'tradeexecutor'
         publishLocation: 'Container'
 
 # ================================
-# STAGE 2: Deploy (With Deployment Job + Environment)
+# DEPLOY STAGE
 # ================================
 - stage: Deploy
-  displayName: 'Deploy Stage'
+  displayName: 'Deploy to VPS'
   dependsOn: Build
-  condition: succeeded()
   jobs:
-  - deployment: DeployJob
-    displayName: 'Deploy Job'
+  - deployment: DeployServices
+    displayName: 'Deploy Both Services'
     environment: 'VPS-Production'
     pool:
       name: 'Default'
@@ -69,60 +158,361 @@ stages:
       runOnce:
         deploy:
           steps:
+          - download: current
+            artifact: signalscraper
+
+          - download: current
+            artifact: tradeexecutor
+
+          # ================================
+          # AUTHENTICATION - EXACT COPY FROM KhulaFxTradeMonitor
+          # ================================
           - task: PowerShell@2
-            displayName: 'Show Deploy Info'
+            displayName: 'Test Authentication'
             inputs:
               targetType: inline
               script: |
-                Write-Host "=" * 80
-                Write-Host "DEPLOY STAGE RUNNING!" -ForegroundColor Green
-                Write-Host "=" * 80
-                Write-Host "✅ This means the environment exists and is accessible"
-                Write-Host "✅ Pipeline is configured correctly"
-                Write-Host "=" * 80
-                Write-Host "Project: $(System.TeamProject)"
-                Write-Host "Environment: VPS-Production"
-                Write-Host "=" * 80
+                $server = "$(vpsServer)"
+                $usernameVariants = @(".\$(deployUser)", "$(deployUser)")
+                $authMethods = @("Negotiate", "Default")
+                $found = $false
+
+                foreach ($auth in $authMethods) {
+                  foreach ($user in $usernameVariants) {
+                    Write-Host "Trying $auth as $user..."
+                    try {
+                      $secPass = ConvertTo-SecureString "$(DEPLOY_PASSWORD)" -AsPlainText -Force
+                      $cred = New-Object PSCredential ($user, $secPass)
+                      $s = New-PSSession -ComputerName $server -Authentication $auth -Credential $cred -ErrorAction Stop
+                      Write-Host "✅ Success with $auth as $user"
+                      Write-Host "##vso[task.setvariable variable=SuccessfulUserName;isOutput=true]$user"
+                      Write-Host "##vso[task.setvariable variable=SuccessfulAuth;isOutput=true]$auth"
+                      Remove-PSSession $s
+                      $found = $true
+                      break
+                    } catch {
+                      Write-Host "❌ Failed"
+                    }
+                  }
+                  if ($found) { break }
+                }
+
+                if (-not $found) {
+                  Write-Error "Authentication failed"
+                  exit 1
+                }
+            name: AuthTest
+
+          # ================================
+          # Deploy SignalScraper Service
+          # ================================
+          - task: PowerShell@2
+            displayName: 'Deploy SignalScraper Service'
+            inputs:
+              targetType: inline
+              script: |
+                $server = "$(vpsServer)"
+                $deployPath = "$(deployPathScraper)"
+                $serviceName = "$(serviceNameScraper)"
+                $artifactPath = "$(Pipeline.Workspace)/signalscraper"
+
+                Write-Host "Deploying to: $deployPath"
+
+                $secPass = ConvertTo-SecureString "$(DEPLOY_PASSWORD)" -AsPlainText -Force
+                $cred = New-Object PSCredential ("$(AuthTest.SuccessfulUserName)", $secPass)
+                $session = New-PSSession -ComputerName $server -Credential $cred -Authentication $(AuthTest.SuccessfulAuth)
+
+                try {
+                  # Stop service
+                  Write-Host "Stopping service..."
+                  Invoke-Command -Session $session -ScriptBlock {
+                    param($svc)
+                    $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    if ($service -and $service.Status -eq 'Running') {
+                      Stop-Service -Name $svc -Force
+                      Start-Sleep -Seconds 5
+                      Write-Host "Service stopped"
+                    }
+                  } -ArgumentList $serviceName
+
+                  # Backup session files
+                  Write-Host "Backing up Telegram session files..."
+                  Invoke-Command -Session $session -ScriptBlock {
+                    param($path)
+                    if (Test-Path $path) {
+                      $backupPath = "$path\session_backup"
+                      if (-not (Test-Path $backupPath)) { 
+                        New-Item -ItemType Directory -Path $backupPath -Force | Out-Null 
+                      }
+                      Get-ChildItem -Path $path -Filter "*.session" | ForEach-Object {
+                        Copy-Item $_.FullName -Destination $backupPath -Force
+                        Write-Host "Backed up: $($_.Name)"
+                      }
+                    }
+                  } -ArgumentList $deployPath
+
+                  # Prepare directory
+                  Write-Host "Preparing directory..."
+                  Invoke-Command -Session $session -ScriptBlock {
+                    param($path)
+                    if (-not (Test-Path $path)) { New-Item -ItemType Directory -Path $path -Force | Out-Null }
+                    Get-ChildItem -Path $path | Where-Object { $_.Name -notmatch 'log|backup|\.session|charts' } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                    Write-Host "Directory ready"
+                  } -ArgumentList $deployPath
+
+                  # Copy files
+                  Write-Host "Copying files..."
+                  Copy-Item -Path "$artifactPath\*" -Destination $deployPath -ToSession $session -Recurse -Force
+                  Write-Host "Files copied"
+
+                  # Restore session files
+                  Write-Host "Restoring Telegram session files..."
+                  Invoke-Command -Session $session -ScriptBlock {
+                    param($path)
+                    $backupPath = "$path\session_backup"
+                    if (Test-Path $backupPath) {
+                      Get-ChildItem -Path $backupPath -Filter "*.session" | ForEach-Object {
+                        Copy-Item $_.FullName -Destination $path -Force
+                        Write-Host "Restored: $($_.Name)"
+                      }
+                    }
+                  } -ArgumentList $deployPath
+
+                  # Install/start service
+                  Write-Host "Starting service..."
+                  $result = Invoke-Command -Session $session -ScriptBlock {
+                    param($svc, $path)
+                    
+                    $exe = Get-ChildItem -Path $path -Filter "DerivCTrader.SignalScraper.exe" -ErrorAction SilentlyContinue
+                    if (-not $exe) {
+                      $exe = Get-ChildItem -Path $path -Filter "*.exe" | 
+                        Where-Object { $_.Name -notlike "createdump*" } |
+                        Sort-Object Length -Descending | 
+                        Select-Object -First 1
+                    }
+                    if (-not $exe) { throw "Executable not found" }
+
+                    $binaryPath = $exe.FullName
+                    Write-Host "Executable: $binaryPath"
+
+                    $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    if ($service) {
+                      Write-Host "Updating existing service..."
+                      sc.exe config $svc binPath= "`"$binaryPath`"" start= auto | Out-Null
+                    } else {
+                      Write-Host "Creating new service..."
+                      New-Service -Name $svc -BinaryPathName $binaryPath -DisplayName "Deriv cTrader Signal Scraper" -StartupType Automatic | Out-Null
+                    }
+
+                    Write-Host "Attempting to start service..."
+                    try {
+                      Start-Service -Name $svc -ErrorAction Stop
+                      Start-Sleep -Seconds 5
+                      
+                      $status = (Get-Service -Name $svc).Status
+                      if ($status -eq 'Running') {
+                        Write-Host "✅ Service running"
+                        return @{ Success = $true; Status = $status }
+                      } else {
+                        Write-Host "⚠️ Service status: $status"
+                        return @{ Success = $false; Status = $status; Error = "Service not running after 5 seconds" }
+                      }
+                    } catch {
+                      Write-Host "❌ Service failed to start: $_"
+                      return @{ Success = $false; Status = "Stopped"; Error = $_.Exception.Message }
+                    }
+                  } -ArgumentList $serviceName, $deployPath
+
+                  if (-not $result.Success) {
+                    Write-Warning "Service deployment completed but service is not running"
+                    Write-Warning "Error: $($result.Error)"
+                  }
+                } finally {
+                  Remove-PSSession $session
+                }
+
+          # ================================
+          # Deploy TradeExecutor Service
+          # ================================
+          - task: PowerShell@2
+            displayName: 'Deploy TradeExecutor Service'
+            inputs:
+              targetType: inline
+              script: |
+                $server = "$(vpsServer)"
+                $deployPath = "$(deployPathExecutor)"
+                $serviceName = "$(serviceNameExecutor)"
+                $artifactPath = "$(Pipeline.Workspace)/tradeexecutor"
+
+                Write-Host "Deploying to: $deployPath"
+
+                $secPass = ConvertTo-SecureString "$(DEPLOY_PASSWORD)" -AsPlainText -Force
+                $cred = New-Object PSCredential ("$(AuthTest.SuccessfulUserName)", $secPass)
+                $session = New-PSSession -ComputerName $server -Credential $cred -Authentication $(AuthTest.SuccessfulAuth)
+
+                try {
+                  # Stop service
+                  Write-Host "Stopping service..."
+                  Invoke-Command -Session $session -ScriptBlock {
+                    param($svc)
+                    $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    if ($service -and $service.Status -eq 'Running') {
+                      Stop-Service -Name $svc -Force
+                      Start-Sleep -Seconds 5
+                      Write-Host "Service stopped"
+                    }
+                  } -ArgumentList $serviceName
+
+                  # Prepare directory
+                  Write-Host "Preparing directory..."
+                  Invoke-Command -Session $session -ScriptBlock {
+                    param($path)
+                    if (-not (Test-Path $path)) { New-Item -ItemType Directory -Path $path -Force | Out-Null }
+                    Get-ChildItem -Path $path | Where-Object { $_.Name -notmatch 'log|backup|charts' } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                    Write-Host "Directory ready"
+                  } -ArgumentList $deployPath
+
+                  # Copy files
+                  Write-Host "Copying files..."
+                  Copy-Item -Path "$artifactPath\*" -Destination $deployPath -ToSession $session -Recurse -Force
+                  Write-Host "Files copied"
+
+                  # Install/start service
+                  Write-Host "Starting service..."
+                  $result = Invoke-Command -Session $session -ScriptBlock {
+                    param($svc, $path)
+                    
+                    $exe = Get-ChildItem -Path $path -Filter "DerivCTrader.TradeExecutor.exe" -ErrorAction SilentlyContinue
+                    if (-not $exe) {
+                      $exe = Get-ChildItem -Path $path -Filter "*.exe" | 
+                        Where-Object { $_.Name -notlike "createdump*" } |
+                        Sort-Object Length -Descending | 
+                        Select-Object -First 1
+                    }
+                    if (-not $exe) { throw "Executable not found" }
+
+                    $binaryPath = $exe.FullName
+                    Write-Host "Executable: $binaryPath"
+
+                    $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    if ($service) {
+                      Write-Host "Updating existing service..."
+                      sc.exe config $svc binPath= "`"$binaryPath`"" start= auto | Out-Null
+                    } else {
+                      Write-Host "Creating new service..."
+                      New-Service -Name $svc -BinaryPathName $binaryPath -DisplayName "Deriv cTrader Trade Executor" -StartupType Automatic | Out-Null
+                    }
+
+                    Write-Host "Attempting to start service..."
+                    try {
+                      Start-Service -Name $svc -ErrorAction Stop
+                      Start-Sleep -Seconds 5
+                      
+                      $status = (Get-Service -Name $svc).Status
+                      if ($status -eq 'Running') {
+                        Write-Host "✅ Service running"
+                        return @{ Success = $true; Status = $status }
+                      } else {
+                        Write-Host "⚠️ Service status: $status"
+                        return @{ Success = $false; Status = $status; Error = "Service not running after 5 seconds" }
+                      }
+                    } catch {
+                      Write-Host "❌ Service failed to start: $_"
+                      return @{ Success = $false; Status = "Stopped"; Error = $_.Exception.Message }
+                    }
+                  } -ArgumentList $serviceName, $deployPath
+
+                  if (-not $result.Success) {
+                    Write-Warning "Service deployment completed but service is not running"
+                    Write-Warning "Error: $($result.Error)"
+                  }
+                } finally {
+                  Remove-PSSession $session
+                }
+
+          # ================================
+          # Check Application Logs
+          # ================================
+          - task: PowerShell@2
+            displayName: 'Check SignalScraper Logs'
+            condition: always()
+            inputs:
+              targetType: inline
+              script: |
+                Write-Host "Checking application logs..."
+                $server = "$(vpsServer)"
+                $deployPath = "$(deployPathScraper)"
+                
+                $secPass = ConvertTo-SecureString "$(DEPLOY_PASSWORD)" -AsPlainText -Force
+                $cred = New-Object PSCredential ("$(AuthTest.SuccessfulUserName)", $secPass)
+                
+                try {
+                  $session = New-PSSession -ComputerName $server -Credential $cred -Authentication $(AuthTest.SuccessfulAuth)
+                  
+                  Invoke-Command -Session $session -ScriptBlock {
+                    param($path)
+                    
+                    $logPath = Join-Path $path "Logs"
+                    
+                    if (Test-Path $logPath) {
+                      $latestLog = Get-ChildItem -Path $logPath -Filter "*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                      
+                      if ($latestLog) {
+                        Write-Host "`nLatest log file: $($latestLog.Name)"
+                        Write-Host "Last 30 lines:"
+                        Write-Host "=" * 80
+                        Get-Content $latestLog.FullName -Tail 30
+                        Write-Host "=" * 80
+                      } else {
+                        Write-Host "No log files found in Logs directory"
+                      }
+                    } else {
+                      Write-Host "Logs directory not found at: $logPath"
+                      Write-Host "This is normal if service hasn't started yet"
+                    }
+                  } -ArgumentList $deployPath
+                  
+                  Remove-PSSession $session
+                } catch {
+                  Write-Warning "Could not read logs: $_"
+                }
 
 # ================================
-# STAGE 3: Report
+# NOTIFY STAGE
 # ================================
-- stage: Report
-  displayName: 'Report Results'
-  dependsOn:
-    - Build
-    - Deploy
+- stage: Notify
+  displayName: 'Send Notification'
+  dependsOn: Deploy
   condition: always()
   jobs:
-  - job: ReportJob
+  - job: SendNotification
     pool:
       name: 'Default'
     steps:
     - task: PowerShell@2
-      displayName: 'Show Final Status'
+      displayName: 'Telegram Notification'
       inputs:
         targetType: inline
         script: |
-          Write-Host "=" * 80
-          Write-Host "PIPELINE RESULTS" -ForegroundColor Yellow
-          Write-Host "=" * 80
+          $status = if ("$(Agent.JobStatus)" -eq "Succeeded") { "✅ SUCCESS" } else { "❌ FAILED" }
+          $message = @"
+          *DerivCTrader Deployment*
           
-          $buildResult = "$(stageDependencies.Build.BuildJob.result)"
-          $deployResult = "$(stageDependencies.Deploy.DeployJob.result)"
+          Status: $status
+          Server: $(vpsServer)
+          Path (Scraper): $(deployPathScraper)
+          Path (Executor): $(deployPathExecutor)
+          Build: $(Build.BuildNumber)
           
-          Write-Host "Build Stage Result: $buildResult"
-          Write-Host "Deploy Stage Result: $deployResult"
+          [View Logs]($(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId))
+          "@
           
-          if ($deployResult -eq "Skipped") {
-            Write-Host "`n❌ DEPLOY WAS SKIPPED" -ForegroundColor Red
-            Write-Host "`nPossible reasons:" -ForegroundColor Yellow
-            Write-Host "1. Environment 'VPS-Production' doesn't exist in project: $(System.TeamProject)"
-            Write-Host "2. Environment requires approval and wasn't approved"
-            Write-Host "3. Pipeline doesn't have permission to use environment"
-            Write-Host "4. Branch protection rules are blocking deployment"
-            Write-Host "`nTo check: Go to Pipelines → Environments → VPS-Production"
-          } else {
-            Write-Host "`n✅ DEPLOY RAN SUCCESSFULLY" -ForegroundColor Green
-            Write-Host "Environment is configured correctly!"
+          $url = "https://api.telegram.org/bot$(TELEGRAM_BOT_TOKEN)/sendMessage"
+          $body = @{ chat_id = "$(TELEGRAM_CHAT_ID)"; text = $message; parse_mode = "Markdown" } | ConvertTo-Json
+          
+          try {
+            Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json; charset=utf-8" -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
+            Write-Host "✅ Notification sent"
+          } catch {
+            Write-Warning "Notification failed"
           }
-          Write-Host "=" * 80
