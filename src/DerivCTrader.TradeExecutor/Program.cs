@@ -94,7 +94,7 @@ class Program
                 })
                 .Build();
 
-            Console.WriteLine("\n========================================");
+            Console.WriteLine("\n========================================_");
             Console.WriteLine("  SERVICES REGISTERED");
             Console.WriteLine("========================================");
             Console.WriteLine("✅ Database Repository");
