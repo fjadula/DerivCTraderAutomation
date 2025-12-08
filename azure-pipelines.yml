@@ -307,16 +307,30 @@ stages:
                 $session = New-PSSession -ComputerName $server -Credential $cred -Authentication $(AuthTest.SuccessfulAuth)
 
                 try {
-                  # Stop service
-                  Write-Host "Stopping service..."
+                  # Stop scheduled task or service
+                  Write-Host "Stopping scheduled task/service..."
                   Invoke-Command -Session $session -ScriptBlock {
                     param($svc)
+                    
+                    # Stop scheduled task if exists
+                    $task = Get-ScheduledTask -TaskName $svc -ErrorAction SilentlyContinue
+                    if ($task) {
+                      Write-Host "Stopping scheduled task..."
+                      Stop-ScheduledTask -TaskName $svc -ErrorAction SilentlyContinue
+                      Start-Sleep -Seconds 3
+                    }
+                    
+                    # Stop service if exists (legacy)
                     $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
                     if ($service -and $service.Status -eq 'Running') {
                       Stop-Service -Name $svc -Force
-                      Start-Sleep -Seconds 5
-                      Write-Host "Service stopped"
+                      Start-Sleep -Seconds 3
                     }
+                    
+                    # Kill any remaining processes
+                    Get-Process | Where-Object { $_.ProcessName -like "*DerivCTrader.SignalScraper*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 5
+                    Write-Host "Stopped"
                   } -ArgumentList $serviceName
 
                   # Backup session files
@@ -452,16 +466,30 @@ stages:
                 $session = New-PSSession -ComputerName $server -Credential $cred -Authentication $(AuthTest.SuccessfulAuth)
 
                 try {
-                  # Stop service
-                  Write-Host "Stopping service..."
+                  # Stop scheduled task or service
+                  Write-Host "Stopping scheduled task/service..."
                   Invoke-Command -Session $session -ScriptBlock {
                     param($svc)
+                    
+                    # Stop scheduled task if exists
+                    $task = Get-ScheduledTask -TaskName $svc -ErrorAction SilentlyContinue
+                    if ($task) {
+                      Write-Host "Stopping scheduled task..."
+                      Stop-ScheduledTask -TaskName $svc -ErrorAction SilentlyContinue
+                      Start-Sleep -Seconds 3
+                    }
+                    
+                    # Stop service if exists (legacy)
                     $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
                     if ($service -and $service.Status -eq 'Running') {
                       Stop-Service -Name $svc -Force
-                      Start-Sleep -Seconds 5
-                      Write-Host "Service stopped"
+                      Start-Sleep -Seconds 3
                     }
+                    
+                    # Kill any remaining processes
+                    Get-Process | Where-Object { $_.ProcessName -like "*DerivCTrader.TradeExecutor*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 5
+                    Write-Host "Stopped"
                   } -ArgumentList $serviceName
 
                   # Prepare directory
