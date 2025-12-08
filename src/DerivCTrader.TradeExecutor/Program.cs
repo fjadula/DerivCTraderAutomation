@@ -14,15 +14,29 @@ class Program
 {
     static async Task Main(string[] args)
     {
+        // CRITICAL FIX: Parse --contentRoot from args FIRST
+        var contentRoot = Directory.GetCurrentDirectory();
+        for (int i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] == "--contentRoot" || args[i] == "--contentroot")
+            {
+                contentRoot = args[i + 1];
+                Directory.SetCurrentDirectory(contentRoot);
+                break;
+            }
+        }
+
         Console.WriteLine("========================================");
         Console.WriteLine("  DERIVCTRADER TRADE EXECUTOR");
-        Console.WriteLine("========================================\n");
+        Console.WriteLine("========================================");
+        Console.WriteLine($"📁 Working Directory: {contentRoot}");
+        Console.WriteLine();
 
         // Load configuration
         var configBuilder = new ConfigurationBuilder()
-            .SetBasePath(Directory.GetCurrentDirectory());
+            .SetBasePath(contentRoot); // Use contentRoot instead of GetCurrentDirectory()
 
-        var productionFile = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.Production.json");
+        var productionFile = Path.Combine(contentRoot, "appsettings.Production.json");
         if (File.Exists(productionFile))
         {
             configBuilder.AddJsonFile("appsettings.Production.json", optional: false, reloadOnChange: true);
@@ -39,13 +53,19 @@ class Program
         // Configure Serilog
         Log.Logger = new LoggerConfiguration()
             .ReadFrom.Configuration(configuration)
+            .WriteTo.File(
+                Path.Combine(contentRoot, "logs", "tradeexecutor-.txt"),
+                rollingInterval: RollingInterval.Day,
+                retainedFileCountLimit: 30)
             .CreateLogger();
 
         try
         {
             Log.Information("Starting Deriv cTrader Trade Executor...");
+            Log.Information("Working directory: {ContentRoot}", contentRoot);
 
             var host = Host.CreateDefaultBuilder(args)
+                .UseContentRoot(contentRoot) // Set content root explicitly
                 .UseSerilog()
                 .ConfigureServices((context, services) =>
                 {
@@ -84,7 +104,6 @@ class Program
             Console.WriteLine("========================================\n");
 
             Log.Information("Host built successfully, starting services...");
-
             await host.RunAsync();
 
             Console.WriteLine("\n=== HOST STOPPED ===");
@@ -94,8 +113,13 @@ class Program
             Console.WriteLine($"\n=== FATAL ERROR: {ex.Message} ===");
             Console.WriteLine(ex.StackTrace);
             Log.Fatal(ex, "Application terminated unexpectedly");
-            Console.WriteLine("\nPress any key to exit...");
-            Console.ReadKey();
+
+            // Don't wait for key press when running as service
+            if (Environment.UserInteractive)
+            {
+                Console.WriteLine("\nPress any key to exit...");
+                Console.ReadKey();
+            }
         }
         finally
         {

@@ -15,15 +15,29 @@ class Program
 {
     static async Task Main(string[] args)
     {
+        // CRITICAL FIX: Parse --contentRoot from args FIRST
+        var contentRoot = Directory.GetCurrentDirectory();
+        for (int i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] == "--contentRoot" || args[i] == "--contentroot")
+            {
+                contentRoot = args[i + 1];
+                Directory.SetCurrentDirectory(contentRoot);
+                break;
+            }
+        }
+
         Console.WriteLine("========================================");
         Console.WriteLine("  DERIVCTRADER SIGNAL SCRAPER");
-        Console.WriteLine("========================================\n");
+        Console.WriteLine("========================================");
+        Console.WriteLine($"📁 Working Directory: {contentRoot}");
+        Console.WriteLine();
 
-        // Build configuration - prioritize Production file if it exists
+        // Build configuration
         var configBuilder = new ConfigurationBuilder()
-            .SetBasePath(Directory.GetCurrentDirectory());
+            .SetBasePath(contentRoot);
 
-        var productionFile = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.Production.json");
+        var productionFile = Path.Combine(contentRoot, "appsettings.Production.json");
         if (File.Exists(productionFile))
         {
             configBuilder.AddJsonFile("appsettings.Production.json", optional: false, reloadOnChange: true);
@@ -37,40 +51,34 @@ class Program
 
         var configuration = configBuilder.Build();
 
-        // Configure Serilog BEFORE using it
+        // Configure Serilog
         Log.Logger = new LoggerConfiguration()
             .ReadFrom.Configuration(configuration)
+            .WriteTo.File(
+                Path.Combine(contentRoot, "logs", "signalscraper-.txt"),
+                rollingInterval: RollingInterval.Day,
+                retainedFileCountLimit: 30)
             .CreateLogger();
 
         try
         {
             Log.Information("Starting Deriv cTrader Signal Scraper...");
+            Log.Information("Working directory: {ContentRoot}", contentRoot);
             Console.WriteLine("\n=== BUILDING HOST ===\n");
 
             var host = Host.CreateDefaultBuilder(args)
+                .UseContentRoot(contentRoot)
                 .UseSerilog()
                 .ConfigureServices((context, services) =>
                 {
-                    // Register configuration
                     services.AddSingleton<IConfiguration>(configuration);
-
-                    // Register repositories
                     services.AddSingleton<ITradeRepository, SqlServerTradeRepository>();
-
-                    // Register cTrader services
                     services.AddCTraderServices(configuration);
-
-                    // Register signal parsers
                     services.AddSingleton<ISignalParser, VipFxParser>();
                     services.AddSingleton<ISignalParser, PerfectFxParser>();
                     services.AddSingleton<ISignalParser, VipChannelParser>();
-
-                    // Register test class
                     services.AddTransient<CTraderConnectionTest>();
-
-                    // Register background services
                     services.AddHostedService<TelegramSignalScraperService>();
-
                     Log.Information("Services registered successfully");
                 })
                 .Build();
@@ -78,49 +86,42 @@ class Program
             Console.WriteLine("✅ HOST BUILT SUCCESSFULLY\n");
             Log.Information("Host built successfully");
 
-            // 🧪 RUN CTRADER CONNECTION TEST FIRST
+            // Test cTrader connection
             Console.WriteLine("==============================================");
-            Console.WriteLine("  STEP 1: TESTING CTRADER CONNECTION");
+            Console.WriteLine("  TESTING CTRADER CONNECTION");
             Console.WriteLine("==============================================\n");
-            
+
             try
             {
                 var testService = host.Services.GetRequiredService<CTraderConnectionTest>();
                 await testService.RunTestAsync();
-                
-                Console.WriteLine("✅ cTrader connection test passed!");
-                Console.WriteLine("\n==============================================");
-                Console.WriteLine("  STEP 2: STARTING TELEGRAM MONITORING");
-                Console.WriteLine("==============================================\n");
+                Console.WriteLine("✅ cTrader connection test passed!\n");
             }
             catch (Exception testEx)
             {
-                Console.WriteLine($"\n❌ cTrader connection test FAILED!");
-                Console.WriteLine($"Error: {testEx.Message}");
-                Console.WriteLine("\n⚠️  Cannot start application without valid cTrader connection.");
-                Console.WriteLine("Please check your credentials in appsettings.Production.json:\n");
-                Console.WriteLine("  - ClientId: Should start with a number");
-                Console.WriteLine("  - ClientSecret: Long alphanumeric string");
-                Console.WriteLine("  - AccessToken: Valid OAuth token (expires in 30 days)");
-                Console.WriteLine("  - DemoAccountId: Your demo account ID (e.g., 2295141)");
-                Console.WriteLine("\nPress any key to exit...");
-                Console.ReadKey();
+                Log.Error(testEx, "cTrader connection test failed");
+                Console.WriteLine($"\n❌ cTrader test FAILED: {testEx.Message}");
+                if (Environment.UserInteractive)
+                {
+                    Console.WriteLine("\nPress any key to exit...");
+                    Console.ReadKey();
+                }
                 return;
             }
 
-            // Start the main application
             Log.Information("Starting Telegram Signal Scraper service...");
             await host.RunAsync();
-
-            Console.WriteLine("\n=== APPLICATION STOPPED ===");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"\n❌ FATAL ERROR: {ex.Message}");
             Console.WriteLine(ex.StackTrace);
             Log.Fatal(ex, "Application terminated unexpectedly");
-            Console.WriteLine("\nPress any key to exit...");
-            Console.ReadKey();
+            if (Environment.UserInteractive)
+            {
+                Console.WriteLine("\nPress any key to exit...");
+                Console.ReadKey();
+            }
         }
         finally
         {
