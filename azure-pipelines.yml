@@ -362,8 +362,8 @@ stages:
                     }
                   } -ArgumentList $deployPath
 
-                  # Install/start service
-                  Write-Host "Starting service..."
+                  # Install/start as Scheduled Task (more reliable than Windows Service)
+                  Write-Host "Creating Scheduled Task..."
                   $result = Invoke-Command -Session $session -ScriptBlock {
                     param($svc, $path)
                     
@@ -378,43 +378,48 @@ stages:
 
                     $binaryPath = $exe.FullName
                     Write-Host "Executable: $binaryPath"
-
+                    
+                    # Delete old Windows Service if it exists
                     $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
                     if ($service) {
-                      Write-Host "Updating existing service..."
-                      sc.exe config $svc binPath= "`"$binaryPath`"" start= auto | Out-Null
-                    } else {
-                      Write-Host "Creating new service..."
-                      New-Service -Name $svc -BinaryPathName $binaryPath -DisplayName "Deriv cTrader Signal Scraper" -StartupType Automatic | Out-Null
+                      Write-Host "Removing old Windows Service..."
+                      sc.exe delete $svc | Out-Null
+                      Start-Sleep -Seconds 2
                     }
                     
-                    # CRITICAL: Increase service timeout to 3 minutes (default is 30 seconds)
-                    Write-Host "Setting service timeout to 180 seconds..."
-                    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$svc" -Name "ServicesPipeTimeout" -Value 180000 -Type DWord -ErrorAction SilentlyContinue
+                    # Remove old scheduled task if it exists
+                    Unregister-ScheduledTask -TaskName $svc -Confirm:$false -ErrorAction SilentlyContinue
+                    
+                    # Create scheduled task
+                    Write-Host "Creating Scheduled Task..."
+                    $action = New-ScheduledTaskAction -Execute $binaryPath -Argument "--contentRoot `"$path`"" -WorkingDirectory $path
+                    $trigger = New-ScheduledTaskTrigger -AtStartup
+                    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartInterval (New-TimeSpan -Minutes 1) -RestartCount 999
+                    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+                    
+                    Register-ScheduledTask -TaskName $svc -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
 
-                    Write-Host "Attempting to start service..."
+                    Write-Host "Starting Scheduled Task..."
                     try {
-                      Start-Service -Name $svc -ErrorAction Stop
+                      Start-ScheduledTask -TaskName $svc -ErrorAction Stop
+                      Start-Sleep -Seconds 15
                       
-                      # Wait longer for service to start (up to 2 minutes)
-                      $timeout = 120
-                      $elapsed = 0
-                      while ($elapsed -lt $timeout) {
-                        Start-Sleep -Seconds 5
-                        $elapsed += 5
-                        $status = (Get-Service -Name $svc).Status
-                        Write-Host "[$elapsed s] Service status: $status"
-                        
-                        if ($status -eq 'Running') {
-                          Write-Host "✅ Service running after $elapsed seconds"
-                          return @{ Success = $true; Status = $status }
-                        }
+                      # Check if process is running
+                      $process = Get-Process | Where-Object { $_.Path -eq $binaryPath } -ErrorAction SilentlyContinue
+                      $taskInfo = Get-ScheduledTask -TaskName $svc
+                      
+                      if ($process) {
+                        Write-Host "✅ Task running (PID: $($process.Id))"
+                        return @{ Success = $true; Status = "Running"; ProcessId = $process.Id }
+                      } elseif ($taskInfo.State -eq "Running") {
+                        Write-Host "✅ Task started"
+                        return @{ Success = $true; Status = "Running" }
+                      } else {
+                        Write-Host "⚠️ Task state: $($taskInfo.State)"
+                        return @{ Success = $false; Status = $taskInfo.State; Error = "Task not running" }
                       }
-                      
-                      Write-Host "⚠️ Service status after $timeout seconds: $status"
-                      return @{ Success = $false; Status = $status; Error = "Service not running after $timeout seconds" }
                     } catch {
-                      Write-Host "❌ Service failed to start: $_"
+                      Write-Host "❌ Failed to start task: $_"
                       return @{ Success = $false; Status = "Stopped"; Error = $_.Exception.Message }
                     }
                   } -ArgumentList $serviceName, $deployPath
@@ -473,8 +478,8 @@ stages:
                   Copy-Item -Path "$artifactPath\*" -Destination $deployPath -ToSession $session -Recurse -Force
                   Write-Host "Files copied"
 
-                  # Install/start service
-                  Write-Host "Starting service..."
+                  # Install/start as Scheduled Task (more reliable than Windows Service)
+                  Write-Host "Creating Scheduled Task..."
                   $result = Invoke-Command -Session $session -ScriptBlock {
                     param($svc, $path)
                     
@@ -489,43 +494,48 @@ stages:
 
                     $binaryPath = $exe.FullName
                     Write-Host "Executable: $binaryPath"
-
+                    
+                    # Delete old Windows Service if it exists
                     $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
                     if ($service) {
-                      Write-Host "Updating existing service..."
-                      sc.exe config $svc binPath= "`"$binaryPath`"" start= auto | Out-Null
-                    } else {
-                      Write-Host "Creating new service..."
-                      New-Service -Name $svc -BinaryPathName $binaryPath -DisplayName "Deriv cTrader Trade Executor" -StartupType Automatic | Out-Null
+                      Write-Host "Removing old Windows Service..."
+                      sc.exe delete $svc | Out-Null
+                      Start-Sleep -Seconds 2
                     }
                     
-                    # CRITICAL: Increase service timeout to 3 minutes (default is 30 seconds)
-                    Write-Host "Setting service timeout to 180 seconds..."
-                    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$svc" -Name "ServicesPipeTimeout" -Value 180000 -Type DWord -ErrorAction SilentlyContinue
+                    # Remove old scheduled task if it exists
+                    Unregister-ScheduledTask -TaskName $svc -Confirm:$false -ErrorAction SilentlyContinue
+                    
+                    # Create scheduled task
+                    Write-Host "Creating Scheduled Task..."
+                    $action = New-ScheduledTaskAction -Execute $binaryPath -Argument "--contentRoot `"$path`"" -WorkingDirectory $path
+                    $trigger = New-ScheduledTaskTrigger -AtStartup
+                    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartInterval (New-TimeSpan -Minutes 1) -RestartCount 999
+                    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+                    
+                    Register-ScheduledTask -TaskName $svc -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
 
-                    Write-Host "Attempting to start service..."
+                    Write-Host "Starting Scheduled Task..."
                     try {
-                      Start-Service -Name $svc -ErrorAction Stop
+                      Start-ScheduledTask -TaskName $svc -ErrorAction Stop
+                      Start-Sleep -Seconds 15
                       
-                      # Wait longer for service to start (up to 2 minutes)
-                      $timeout = 120
-                      $elapsed = 0
-                      while ($elapsed -lt $timeout) {
-                        Start-Sleep -Seconds 5
-                        $elapsed += 5
-                        $status = (Get-Service -Name $svc).Status
-                        Write-Host "[$elapsed s] Service status: $status"
-                        
-                        if ($status -eq 'Running') {
-                          Write-Host "✅ Service running after $elapsed seconds"
-                          return @{ Success = $true; Status = $status }
-                        }
+                      # Check if process is running
+                      $process = Get-Process | Where-Object { $_.Path -eq $binaryPath } -ErrorAction SilentlyContinue
+                      $taskInfo = Get-ScheduledTask -TaskName $svc
+                      
+                      if ($process) {
+                        Write-Host "✅ Task running (PID: $($process.Id))"
+                        return @{ Success = $true; Status = "Running"; ProcessId = $process.Id }
+                      } elseif ($taskInfo.State -eq "Running") {
+                        Write-Host "✅ Task started"
+                        return @{ Success = $true; Status = "Running" }
+                      } else {
+                        Write-Host "⚠️ Task state: $($taskInfo.State)"
+                        return @{ Success = $false; Status = $taskInfo.State; Error = "Task not running" }
                       }
-                      
-                      Write-Host "⚠️ Service status after $timeout seconds: $status"
-                      return @{ Success = $false; Status = $status; Error = "Service not running after $timeout seconds" }
                     } catch {
-                      Write-Host "❌ Service failed to start: $_"
+                      Write-Host "❌ Failed to start task: $_"
                       return @{ Success = $false; Status = "Stopped"; Error = $_.Exception.Message }
                     }
                   } -ArgumentList $serviceName, $deployPath
