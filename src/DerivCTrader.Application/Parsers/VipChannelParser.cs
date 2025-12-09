@@ -17,7 +17,8 @@ public class VipChannelParser : ISignalParser
 
     public bool CanParse(string providerChannelId)
     {
-        var canParse = providerChannelId == "-1392143914";        // VIPChannel
+        // REMOVED TestChannel - now handled by TestChannelParser
+        var canParse = providerChannelId == "-1392143914";  // VIPChannel only
 
         _logger.LogInformation("VipChannelParser.CanParse({Channel}): {Result}", providerChannelId, canParse);
 
@@ -43,7 +44,7 @@ public class VipChannelParser : ISignalParser
 
             _logger.LogInformation("VipChannelParser: Pattern matched!");
 
-            var asset = match.Groups[1].Value.Replace("/", "");  // GBP/CAD -> GBPCAD
+            var asset = match.Groups[1].Value.Replace("/", "").ToUpper();  // GBP/CAD -> GBPCAD
             var direction = match.Groups[2].Value.ToUpper() == "CALL" ? TradeDirection.Call : TradeDirection.Put;
             var expiry = int.Parse(match.Groups[3].Value);
 
@@ -53,6 +54,7 @@ public class VipChannelParser : ISignalParser
             return new ParsedSignal
             {
                 ProviderChannelId = providerChannelId,
+                ProviderName = "VIPChannel",
                 Asset = asset,
                 Direction = direction,
                 SignalType = SignalType.PureBinary,

@@ -17,7 +17,8 @@ public class PerfectFxParser : ISignalParser
 
     public bool CanParse(string providerChannelId)
     {
-        var canParse = providerChannelId == "-1001446944855";     // PERFECTFX
+        // REMOVED TestChannel - now handled by TestChannelParser
+        var canParse = providerChannelId == "-1001446944855"; // PERFECTFX only
 
         _logger.LogInformation("PerfectFxParser.CanParse({Channel}): {Result}", providerChannelId, canParse);
 
@@ -31,7 +32,7 @@ public class PerfectFxParser : ISignalParser
             _logger.LogInformation("PerfectFxParser: Starting parse attempt");
             _logger.LogInformation("PerfectFxParser: Message: {Message}", message);
 
-            // PERFECTFX format: "AUDUSD BUY AT 0.65156\nTP 0.67392\nSL 0.64429"
+            // PERFECTFX format: "AUDUSD BUY AT 0.65156 TP 0.67392 SL 0.64429"
             var pattern = @"(\w+)\s+(BUY|SELL)\s+AT\s+([\d.]+)\s+TP\s+([\d.]+)\s+SL\s+([\d.]+)";
             var match = Regex.Match(message, pattern, RegexOptions.Singleline | RegexOptions.IgnoreCase);
 
@@ -43,7 +44,7 @@ public class PerfectFxParser : ISignalParser
 
             _logger.LogInformation("PerfectFxParser: Pattern matched!");
 
-            var asset = match.Groups[1].Value;
+            var asset = match.Groups[1].Value.ToUpper();
             var direction = match.Groups[2].Value.ToUpper() == "BUY" ? TradeDirection.Buy : TradeDirection.Sell;
             var entry = decimal.Parse(match.Groups[3].Value);
             var tp = decimal.Parse(match.Groups[4].Value);
@@ -55,6 +56,7 @@ public class PerfectFxParser : ISignalParser
             return new ParsedSignal
             {
                 ProviderChannelId = providerChannelId,
+                ProviderName = "PERFECTFX",
                 Asset = asset,
                 Direction = direction,
                 EntryPrice = entry,
