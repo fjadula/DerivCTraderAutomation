@@ -94,8 +94,7 @@ public class TelegramSignalScraperService : BackgroundService
         _logger.LogInformation("Total channels mapped: {Count}", _channelMappings.Count);
     }
 
-        _logger.LogInformation("Total channels mapped: {Count}", _channelMappings.Count);
-    }
+  
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
