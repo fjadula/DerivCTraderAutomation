@@ -74,9 +74,14 @@ class Program
                     services.AddSingleton<IConfiguration>(configuration);
                     services.AddSingleton<ITradeRepository, SqlServerTradeRepository>();
                     services.AddCTraderServices(configuration);
+                    // Register signal parsers - ORDER MATTERS!
+                    // Test channel parser MUST be registered FIRST
+                    services.AddSingleton<ISignalParser, TestChannelParser>();
                     services.AddSingleton<ISignalParser, VipFxParser>();
                     services.AddSingleton<ISignalParser, PerfectFxParser>();
                     services.AddSingleton<ISignalParser, VipChannelParser>();
+                    services.AddSingleton<ISignalParser, TradingHubVipParser>();
+                    services.AddSingleton<ISignalParser, SyntheticIndicesParser>();
                     services.AddTransient<CTraderConnectionTest>();
                     services.AddHostedService<TelegramSignalScraperService>();
                     Log.Information("Services registered successfully");
