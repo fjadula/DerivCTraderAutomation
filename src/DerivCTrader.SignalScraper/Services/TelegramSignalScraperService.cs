@@ -52,7 +52,6 @@ public class TelegramSignalScraperService : BackgroundService
             {
                 // Extract the numeric part based on format
                 long mappingKey;
-
                 if (channelValue.StartsWith("-100"))
                 {
                     // Standard supergroup: -1001234567890 → map by last digits (1234567890)
