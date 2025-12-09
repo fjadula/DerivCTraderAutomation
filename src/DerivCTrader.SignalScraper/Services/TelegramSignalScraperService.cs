@@ -31,21 +31,69 @@ public class TelegramSignalScraperService : BackgroundService
 
         // Build channel ID mappings
         _channelMappings = new Dictionary<long, string>();
+        // Build channel ID mappings - handle ALL channel formats
+        _channelMappings = new Dictionary<long, string>();
         var channels = _configuration.GetSection("ProviderChannels");
         foreach (var channel in channels.GetChildren())
         {
             var channelValue = channel.Value;
-            if (channelValue != null && channelValue.StartsWith("-100"))
+            if (string.IsNullOrEmpty(channelValue))
+                continue;
+
+            // Skip username-based channels (e.g., @ChannelName)
+            if (channelValue.StartsWith("@"))
             {
-                // Extract numeric part after -100
-                var numericPart = channelValue.Substring(4);
-                if (long.TryParse(numericPart, out var channelId))
+                _logger.LogWarning("Skipping username-based channel: {Channel} - numeric ID required", channelValue);
+                continue;
+            }
+
+            // Handle any negative channel ID
+            if (channelValue.StartsWith("-") && long.TryParse(channelValue, out var fullChannelId))
+            {
+                // Extract the numeric part based on format
+                long mappingKey;
+
+                if (channelValue.StartsWith("-100"))
                 {
-                    _channelMappings[channelId] = channelValue;
-                    _logger.LogInformation("Mapped channel {Id} -> {Value}", channelId, channelValue);
+                    // Standard supergroup: -1001234567890 → map by last digits (1234567890)
+                    var numericPart = channelValue.Substring(4);
+                    if (long.TryParse(numericPart, out var channelId))
+                    {
+                        mappingKey = channelId;
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Failed to parse channel ID: {Channel}", channelValue);
+                        continue;
+                    }
                 }
+                else
+                {
+                    // Other formats (-14xxx, -13xxx, -22xxx, etc.) → map by digits after -1
+                    // This handles: -1476865523, -1392143914, -22xxxxxxxxx, etc.
+                    var numericPart = channelValue.Substring(2); // Remove "-1"
+                    if (long.TryParse(numericPart, out var channelId))
+                    {
+                        mappingKey = channelId;
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Failed to parse channel ID: {Channel}", channelValue);
+                        continue;
+                    }
+                }
+
+                _channelMappings[mappingKey] = channelValue;
+                _logger.LogInformation("Mapped channel {Key} -> {Value}", mappingKey, channelValue);
+            }
+            else
+            {
+                _logger.LogWarning("Invalid channel format: {Channel} (must start with - and be numeric)", channelValue);
             }
         }
+
+        _logger.LogInformation("Total channels mapped: {Count}", _channelMappings.Count);
+    }
 
         _logger.LogInformation("Total channels mapped: {Count}", _channelMappings.Count);
     }
