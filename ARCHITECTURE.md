@@ -263,8 +263,8 @@ DerivCTraderAutomation/
 - VIPFX (-1001138473049)
 - PERFECTFX (-1001446944855)
 - TradingHubVIP (-1476865523)
-- DeriveVIKnights (@DeriveVIKnightsPtY)
-- SyntheticIndicesTrader (-1679549617)
+- DeriveVIKnights (-1001304028537)
+- SyntheticIndicesTrader (-1003204276456)
 - VIP_CHANNEL (-1392143914)
 
 ### 2. Deriv API (WebSocket)
