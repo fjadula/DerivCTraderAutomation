@@ -40,10 +40,11 @@ public class ProtoOANewOrderReq : IMessage<ProtoOANewOrderReq>
         {
             size += 1 + CodedOutputStream.ComputeInt64Size(Volume);
         }
-        if (StopPrice != 0)
-        {
-            size += 1 + sizeof(double);
-        }
+        // StopPrice is not used in our implementation - always skip it
+        // if (StopPrice != 0)
+        // {
+        //     size += 1 + sizeof(double);
+        // }
         if (StopLoss.HasValue)
         {
             size += 1 + sizeof(double);

@@ -75,6 +75,8 @@ public class CTraderForexProcessorService : BackgroundService
         // Get all unprocessed signals
         var signals = await _repository.GetUnprocessedSignalsAsync();
 
+        _logger.LogDebug("🔍 Polling database - found {Count} total unprocessed signals", signals.Count);
+
         if (signals.Count == 0)
             return;
 
