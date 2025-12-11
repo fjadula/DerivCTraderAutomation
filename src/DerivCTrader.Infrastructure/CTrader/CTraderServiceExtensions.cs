@@ -38,6 +38,9 @@ public static class CTraderServiceExtensions
         services.AddSingleton(cTraderConfig);
         services.AddSingleton<ICTraderClient, CTraderClient>();
         services.AddSingleton<ICTraderOrderManager, CTraderOrderManager>();
+        services.AddSingleton<ICTraderSymbolService, CTraderSymbolService>();
+        services.AddSingleton<ICTraderPriceMonitor, CTraderPriceMonitor>();
+        services.AddSingleton<ICTraderPendingOrderService, CTraderPendingOrderService>();
 
         return services;
     }

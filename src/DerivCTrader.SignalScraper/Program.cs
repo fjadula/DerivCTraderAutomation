@@ -82,6 +82,7 @@ class Program
                     services.AddSingleton<ISignalParser, VipChannelParser>();
                     services.AddSingleton<ISignalParser, TradingHubVipParser>();
                     services.AddSingleton<ISignalParser, SyntheticIndicesParser>();
+                    services.AddSingleton<ISignalParser, NewStratsParser>();
                     services.AddTransient<CTraderConnectionTest>();
                     services.AddHostedService<TelegramSignalScraperService>();
                     Log.Information("Services registered successfully");

@@ -1,6 +1,8 @@
-﻿using DerivCTrader.Application.Interfaces;
+﻿using System.Globalization;
+using DerivCTrader.Application.Interfaces;
 using DerivCTrader.Infrastructure.Deriv;
 using DerivCTrader.Domain.Entities;
+using DerivCTrader.Domain.Enums;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -28,7 +30,9 @@ public class BinaryExecutionService : BackgroundService
         _repository = repository;
         _derivClient = derivClient;
         
-        _defaultStake = decimal.Parse(configuration["BinaryOptions:DefaultStake"] ?? "20");
+        _defaultStake = decimal.Parse(
+            configuration["BinaryOptions:DefaultStake"] ?? "20",
+            CultureInfo.InvariantCulture);
         _pollIntervalSeconds = int.Parse(configuration["BinaryExecutor:PollIntervalSeconds"] ?? "5");
     }
 
@@ -80,10 +84,18 @@ public class BinaryExecutionService : BackgroundService
         if (signals.Count == 0)
             return;
 
-        _logger.LogInformation("📋 Found {Count} unprocessed signals", signals.Count);
-        Console.WriteLine($"📋 Found {signals.Count} unprocessed signals");
+        // Filter for PURE BINARY signals only (forex signals handled by CTraderForexProcessorService)
+        var pureBinarySignals = signals
+            .Where(s => s.SignalType == SignalType.PureBinary)
+            .ToList();
 
-        foreach (var signal in signals)
+        if (pureBinarySignals.Count == 0)
+            return;
+
+        _logger.LogInformation("📋 Found {Count} unprocessed pure binary signals", pureBinarySignals.Count);
+        Console.WriteLine($"📋 Found {pureBinarySignals.Count} pure binary signal(s)");
+
+        foreach (var signal in pureBinarySignals)
         {
             try
             {
@@ -124,30 +136,37 @@ public class BinaryExecutionService : BackgroundService
             return;
         }
 
-        // Save to BinaryOptionTrade (not TradeExecutionQueue)
-        // NOTE: TradeExecutionQueue is ONLY for cTrader→Deriv matching
-        var binaryTrade = new BinaryOptionTrade
+        // Write to TradeExecutionQueue for KhulaFxTradeMonitor to pick up strategy name
+        // Generate a unique order ID for pure binary signals (not from cTrader)
+        string generatedOrderId = $"PB_{DateTime.UtcNow:yyyyMMddHHmmss}_{signal.SignalId}";
+        string strategyName = string.IsNullOrEmpty(signal.ProviderName) 
+            ? $"PureBinary_{signal.Asset}" 
+            : signal.ProviderName;
+
+        var queueEntry = new TradeExecutionQueue
         {
-            AssetName = signal.Asset,
+            CTraderOrderId = generatedOrderId,
+            Asset = signal.Asset,
             Direction = direction,
-            OpenTime = DateTime.UtcNow,
-            ExpiryLength = expiryMinutes,
-            StrategyName = $"{signal.ProviderName}_{signal.Asset}_{DateTime.UtcNow:yyyyMMddHHmmss}",
-            CreatedAt = DateTime.UtcNow,
-            TradeStake = _defaultStake,
-            ExpectedExpiryTimestamp = DateTime.UtcNow.AddMinutes(expiryMinutes)
+            StrategyName = strategyName,
+            IsOpposite = false,
+            ProviderChannelId = signal.ProviderChannelId,
+            DerivContractId = result.ContractId,  // Save Deriv contract ID for reference
+            CreatedAt = DateTime.UtcNow
         };
 
-        // TODO: Store contract ID if BinaryOptionTrade schema is extended
-        await _repository.CreateBinaryTradeAsync(binaryTrade);
+        await _repository.EnqueueTradeAsync(queueEntry);
 
-        // Mark signal as processed
+        // Mark signal as processed IMMEDIATELY after successful execution
         await _repository.MarkSignalAsProcessedAsync(signal.SignalId);
 
         _logger.LogInformation("✅ TRADE EXECUTED: {Asset} {Direction} ${Stake} {Expiry}min - Contract: {ContractId}",
             signal.Asset, direction, _defaultStake, expiryMinutes, result.ContractId);
+        _logger.LogInformation("📝 Queue entry created: OrderId={OrderId}, Strategy={Strategy}, ContractId={ContractId}", 
+            generatedOrderId, strategyName, result.ContractId);
         Console.WriteLine($"✅ EXECUTED: {signal.Asset} {direction} ${_defaultStake} {expiryMinutes}min");
         Console.WriteLine($"   Contract: {result.ContractId}");
+        Console.WriteLine($"   Strategy: {strategyName}");
 
         // Log balance
         try

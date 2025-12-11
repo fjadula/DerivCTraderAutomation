@@ -167,20 +167,30 @@ public class DerivWebSocketClient : IDerivClient, IDisposable
             }
         }
 
+        // Remove slashes from forex pairs (EUR/CAD -> EURCAD)
+        string cleanedAsset = asset.Replace("/", "").Replace(" ", "");
+
         // Standard forex pairs - Deriv uses format like "frxEURUSD"
-        if (asset.Length == 6)  // e.g., EURUSD, GBPJPY
+        // Check if it looks like a forex pair (6 or 7 characters, uppercase letters)
+        if (cleanedAsset.Length >= 6 && cleanedAsset.Length <= 7 && 
+            cleanedAsset.All(char.IsLetter))
         {
-            return $"frx{asset}";
+            // Add frx prefix if not already present
+            if (!cleanedAsset.StartsWith("frx", StringComparison.OrdinalIgnoreCase))
+            {
+                return $"frx{cleanedAsset.ToUpper()}";
+            }
+            return cleanedAsset;
         }
 
         // Commodities like XAUUSD
-        if (asset.StartsWith("XAU"))
+        if (cleanedAsset.StartsWith("XAU", StringComparison.OrdinalIgnoreCase))
         {
             return "frxXAUUSD";
         }
 
-        // Default: return as-is
-        return asset;
+        // Default: return cleaned asset
+        return cleanedAsset;
     }
 
     private async Task<JObject?> SendRequestAsync(object request)

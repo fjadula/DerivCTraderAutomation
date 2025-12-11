@@ -1,5 +1,6 @@
 ﻿using DerivCTrader.Application.Interfaces;
-using DerivCTrader.Infrastructure.Database;
+using DerivCTrader.Infrastructure.CTrader.Extensions;
+using DerivCTrader.Infrastructure.Persistence;
 using DerivCTrader.Infrastructure.Deriv;
 using DerivCTrader.Infrastructure.ExpiryCalculation;
 using DerivCTrader.TradeExecutor.Services;
@@ -80,27 +81,37 @@ class Program
                     // Database
                     services.AddSingleton<ITradeRepository, SqlServerTradeRepository>();
 
-                    // Deriv client
-                    services.AddSingleton<IDerivClient, DerivClient>();
+                    // Deriv client - TRANSIENT so each service gets its own WebSocket connection
+                    services.AddTransient<IDerivClient, DerivClient>();
 
                     // Binary expiry calculator
                     services.AddSingleton<IBinaryExpiryCalculator, BinaryExpiryCalculator>();
 
-                    // Register background services
-                    services.AddHostedService<BinaryExecutionService>();
+                    // cTrader services
+                    services.AddCTraderServices(configuration);
+
+                    // Register background services (ORDER MATTERS - Symbol initializer must run first!)
+                    services.AddHostedService<CTraderSymbolInitializerService>(); // FIRST: Initialize cTrader & symbols
+                    services.AddHostedService<CTraderForexProcessorService>();    // Process forex signals -> cTrader
+                    services.AddHostedService<DerivBinaryExecutorService>();      // Process TradeExecutionQueue -> Deriv
+                    services.AddHostedService<BinaryExecutionService>();          // Process pure binary signals -> Deriv
                     services.AddHostedService<OutcomeMonitorService>();
 
                     Log.Information("Services registered successfully");
                 })
                 .Build();
-
-            Console.WriteLine("\n========================================_");
+            Console.WriteLine("\n========================================");
             Console.WriteLine("  SERVICES REGISTERED");
             Console.WriteLine("========================================");
             Console.WriteLine("✅ Database Repository");
+            Console.WriteLine("✅ cTrader Services (Client, Orders, Monitor)");
             Console.WriteLine("✅ Deriv WebSocket Client");
-            Console.WriteLine("✅ Binary Execution Service");
+            Console.WriteLine("✅ cTrader Symbol Initializer (runs first)");
+            Console.WriteLine("✅ cTrader Forex Processor Service");
+            Console.WriteLine("✅ Deriv Binary Executor Service (Queue)");
+            Console.WriteLine("✅ Binary Execution Service (Pure Binary)");
             Console.WriteLine("✅ Outcome Monitor Service");
+            Console.WriteLine("========================================\n");
             Console.WriteLine("========================================\n");
 
             Log.Information("Host built successfully, starting services...");

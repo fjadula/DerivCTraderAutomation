@@ -12,9 +12,8 @@ public class DerivClient : IDerivClient, IDisposable
     private readonly ILogger<DerivClient> _logger;
     private readonly DerivConfig _config;
     private ClientWebSocket? _webSocket;
-    private CancellationTokenSource? _receiveCts;
-    private Task? _receiveTask;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
+    private readonly SemaphoreSlim _authLock = new(1, 1);
     private int _requestId = 1;
 
     public bool IsConnected { get; private set; }
@@ -30,38 +29,79 @@ public class DerivClient : IDerivClient, IDisposable
     {
         try
         {
+            // Clean up any existing connection
+            await CleanupConnectionAsync();
+
             _logger.LogInformation("Connecting to Deriv at {Url}...", _config.WebSocketUrl);
             Console.WriteLine($"=== DERIV: Connecting to {_config.WebSocketUrl} ===");
 
             _webSocket = new ClientWebSocket();
+            _webSocket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
+            
             await _webSocket.ConnectAsync(new Uri(_config.WebSocketUrl), cancellationToken);
 
             IsConnected = true;
             _logger.LogInformation("✅ Connected to Deriv");
             Console.WriteLine("=== DERIV: ✅ Connected ===");
 
-            // Start receiving messages
-            _receiveCts = new CancellationTokenSource();
-            _receiveTask = Task.Run(() => ReceiveMessagesAsync(_receiveCts.Token), _receiveCts.Token);
+            // No background receive task - we use request/response pattern
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to connect to Deriv");
             Console.WriteLine($"=== DERIV: ❌ Connection failed: {ex.Message} ===");
             IsConnected = false;
+            await CleanupConnectionAsync();
             throw;
+        }
+    }
+
+    private async Task CleanupConnectionAsync()
+    {
+        try
+        {
+            if (_webSocket != null)
+            {
+                if (_webSocket.State == WebSocketState.Open || _webSocket.State == WebSocketState.CloseReceived)
+                {
+                    await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Cleanup", CancellationToken.None);
+                }
+                _webSocket.Dispose();
+                _webSocket = null;
+            }
+
+            IsConnected = false;
+            IsAuthorized = false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error during connection cleanup");
         }
     }
 
     public async Task AuthorizeAsync(CancellationToken cancellationToken = default)
     {
+        // Prevent concurrent authorization attempts from multiple services
+        await _authLock.WaitAsync(cancellationToken);
         try
         {
+            // If already authorized, skip
+            if (IsAuthorized)
+            {
+                _logger.LogInformation("Already authorized with Deriv");
+                return;
+            }
+
             _logger.LogInformation("Authorizing with Deriv...");
             Console.WriteLine("=== DERIV: Authorizing ===");
 
-            if (!IsConnected)
-                throw new InvalidOperationException("Not connected to Deriv");
+            // Check connection state and reconnect if needed
+            if (!IsConnected || _webSocket == null || _webSocket.State != WebSocketState.Open)
+            {
+                _logger.LogWarning("Deriv connection not ready (State: {State}), reconnecting...", 
+                    _webSocket?.State.ToString() ?? "null");
+                await ConnectAsync(cancellationToken);
+            }
 
             var request = new
             {
@@ -87,7 +127,12 @@ public class DerivClient : IDerivClient, IDisposable
         {
             _logger.LogError(ex, "Authorization failed");
             Console.WriteLine($"=== DERIV: ❌ Auth failed: {ex.Message} ===");
+            IsAuthorized = false;
             throw;
+        }
+        finally
+        {
+            _authLock.Release();
         }
     }
 
@@ -96,17 +141,7 @@ public class DerivClient : IDerivClient, IDisposable
         try
         {
             _logger.LogInformation("Disconnecting from Deriv...");
-
-            _receiveCts?.Cancel();
-
-            if (_webSocket?.State == WebSocketState.Open)
-            {
-                await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Client disconnect", CancellationToken.None);
-            }
-
-            IsConnected = false;
-            IsAuthorized = false;
-
+            await CleanupConnectionAsync();
             _logger.LogInformation("✅ Disconnected from Deriv");
         }
         catch (Exception ex)
@@ -306,10 +341,17 @@ public class DerivClient : IDerivClient, IDisposable
         await _sendLock.WaitAsync(cancellationToken);
         try
         {
+            // Verify WebSocket is in valid state
+            if (_webSocket == null || _webSocket.State != WebSocketState.Open)
+            {
+                throw new InvalidOperationException(
+                    $"WebSocket is not ready for communication. State: {_webSocket?.State.ToString() ?? "null"}");
+            }
+
             var json = JsonConvert.SerializeObject(request);
             var bytes = Encoding.UTF8.GetBytes(json);
 
-            await _webSocket!.SendAsync(
+            await _webSocket.SendAsync(
                 new ArraySegment<byte>(bytes),
                 WebSocketMessageType.Text,
                 true,
@@ -317,9 +359,12 @@ public class DerivClient : IDerivClient, IDisposable
 
             _logger.LogDebug("Sent: {Json}", json);
 
-            // Receive response
+            // Receive response with timeout
             var buffer = new byte[8192];
-            var result = await _webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+            
+            var result = await _webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), linkedCts.Token);
 
             var responseJson = Encoding.UTF8.GetString(buffer, 0, result.Count);
             _logger.LogDebug("Received: {Json}", responseJson);
@@ -332,45 +377,10 @@ public class DerivClient : IDerivClient, IDisposable
         }
     }
 
-    private async Task ReceiveMessagesAsync(CancellationToken cancellationToken)
-    {
-        var buffer = new byte[8192];
-
-        try
-        {
-            while (!cancellationToken.IsCancellationRequested && _webSocket?.State == WebSocketState.Open)
-            {
-                var result = await _webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
-
-                if (result.MessageType == WebSocketMessageType.Close)
-                {
-                    _logger.LogWarning("WebSocket closed by server");
-                    await DisconnectAsync();
-                    break;
-                }
-
-                var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                _logger.LogDebug("Background received: {Json}", json);
-
-                // Handle subscription updates here if needed
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            _logger.LogInformation("Receive task cancelled");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error receiving messages");
-            await DisconnectAsync();
-        }
-    }
-
     public void Dispose()
     {
-        _receiveCts?.Cancel();
-        _receiveCts?.Dispose();
         _webSocket?.Dispose();
         _sendLock?.Dispose();
+        _authLock?.Dispose();
     }
 }

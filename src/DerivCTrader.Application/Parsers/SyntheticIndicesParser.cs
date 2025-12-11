@@ -54,11 +54,11 @@ public class SyntheticIndicesParser : ISignalParser
             // Or keep as-is and let order execution handle the mapping
             var asset = ConvertToDerivAsset(rawAsset);
 
-            var entryMin = decimal.Parse(match.Groups[3].Value);
-            var entryMax = decimal.Parse(match.Groups[4].Value);
+            var entryMin = decimal.Parse(match.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture);
+            var entryMax = decimal.Parse(match.Groups[4].Value, System.Globalization.CultureInfo.InvariantCulture);
             var entry = (entryMin + entryMax) / 2; // Use middle of zone
-            var tp = decimal.Parse(match.Groups[5].Value);
-            var sl = decimal.Parse(match.Groups[6].Value);
+            var tp = decimal.Parse(match.Groups[5].Value, System.Globalization.CultureInfo.InvariantCulture);
+            var sl = decimal.Parse(match.Groups[6].Value, System.Globalization.CultureInfo.InvariantCulture);
 
             _logger.LogInformation("SyntheticIndicesParser: Parsed - {Asset} {Direction} @ {Entry}, TP: {TP}, SL: {SL}",
                 asset, direction, entry, tp, sl);

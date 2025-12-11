@@ -56,6 +56,12 @@ public class TradeExecutionQueue
     public bool IsOpposite { get; set; }
 
     /// <summary>
+    /// Deriv contract ID (for pure binary signals executed directly on Deriv)
+    /// Used to reference back to BinaryOptionTrades table
+    /// </summary>
+    public string? DerivContractId { get; set; }
+
+    /// <summary>
     /// When the cTrader execution was detected
     /// </summary>
     public DateTime CreatedAt { get; set; }

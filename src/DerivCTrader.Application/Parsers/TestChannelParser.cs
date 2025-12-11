@@ -94,9 +94,9 @@ public class TestChannelParser : ISignalParser
             ProviderName = "TestChannel",
             Asset = match.Groups[2].Value.ToUpper(),
             Direction = match.Groups[1].Value.ToLower() == "selling" ? TradeDirection.Sell : TradeDirection.Buy,
-            EntryPrice = decimal.Parse(match.Groups[3].Value),
-            TakeProfit = decimal.Parse(match.Groups[4].Value),
-            StopLoss = decimal.Parse(match.Groups[5].Value),
+            EntryPrice = decimal.Parse(match.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture),
+            TakeProfit = decimal.Parse(match.Groups[4].Value, System.Globalization.CultureInfo.InvariantCulture),
+            StopLoss = decimal.Parse(match.Groups[5].Value, System.Globalization.CultureInfo.InvariantCulture),
             SignalType = SignalType.Text,
             ReceivedAt = DateTime.UtcNow
         };
@@ -115,9 +115,9 @@ public class TestChannelParser : ISignalParser
             ProviderName = "TestChannel",
             Asset = match.Groups[1].Value.ToUpper(),
             Direction = match.Groups[2].Value.ToUpper() == "BUY" ? TradeDirection.Buy : TradeDirection.Sell,
-            EntryPrice = decimal.Parse(match.Groups[3].Value),
-            TakeProfit = decimal.Parse(match.Groups[4].Value),
-            StopLoss = decimal.Parse(match.Groups[5].Value),
+            EntryPrice = decimal.Parse(match.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture),
+            TakeProfit = decimal.Parse(match.Groups[4].Value, System.Globalization.CultureInfo.InvariantCulture),
+            StopLoss = decimal.Parse(match.Groups[5].Value, System.Globalization.CultureInfo.InvariantCulture),
             SignalType = SignalType.Text,
             ReceivedAt = DateTime.UtcNow
         };
@@ -137,9 +137,9 @@ public class TestChannelParser : ISignalParser
             ProviderName = "TestChannel",
             Asset = match.Groups[2].Value.ToUpper(),
             Direction = match.Groups[1].Value.ToUpper() == "BUY" ? TradeDirection.Buy : TradeDirection.Sell,
-            EntryPrice = decimal.Parse(match.Groups[3].Value),
-            TakeProfit = decimal.Parse(match.Groups[5].Value),
-            StopLoss = decimal.Parse(match.Groups[4].Value),
+            EntryPrice = decimal.Parse(match.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture),
+            TakeProfit = decimal.Parse(match.Groups[5].Value, System.Globalization.CultureInfo.InvariantCulture),
+            StopLoss = decimal.Parse(match.Groups[4].Value, System.Globalization.CultureInfo.InvariantCulture),
             SignalType = SignalType.Text,
             ReceivedAt = DateTime.UtcNow
         };
@@ -153,8 +153,8 @@ public class TestChannelParser : ISignalParser
 
         if (!match.Success) return null;
 
-        var entryMin = decimal.Parse(match.Groups[3].Value);
-        var entryMax = decimal.Parse(match.Groups[4].Value);
+        var entryMin = decimal.Parse(match.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture);
+        var entryMax = decimal.Parse(match.Groups[4].Value, System.Globalization.CultureInfo.InvariantCulture);
         var entry = (entryMin + entryMax) / 2; // Use middle of zone
 
         return new ParsedSignal
@@ -164,8 +164,8 @@ public class TestChannelParser : ISignalParser
             Asset = match.Groups[2].Value.Trim().Replace(" ", "").ToUpper(), // "Volatility 75 Index" -> "VOLATILITY75INDEX"
             Direction = match.Groups[1].Value.ToUpper() == "BUY" ? TradeDirection.Buy : TradeDirection.Sell,
             EntryPrice = entry,
-            TakeProfit = decimal.Parse(match.Groups[5].Value),
-            StopLoss = decimal.Parse(match.Groups[6].Value),
+            TakeProfit = decimal.Parse(match.Groups[5].Value, System.Globalization.CultureInfo.InvariantCulture),
+            StopLoss = decimal.Parse(match.Groups[6].Value, System.Globalization.CultureInfo.InvariantCulture),
             SignalType = SignalType.Text,
             ReceivedAt = DateTime.UtcNow
         };

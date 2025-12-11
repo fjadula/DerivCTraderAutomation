@@ -144,6 +144,7 @@ Write to TradeExecutionQueue:
   - Asset
   - Direction
   - StrategyName (from provider)
+  - ProviderChannelId
   - IsOpposite flag
     ↓
 Calculate expiry (15min or 30min)

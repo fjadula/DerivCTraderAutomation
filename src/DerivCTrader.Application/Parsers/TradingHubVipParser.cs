@@ -48,9 +48,9 @@ public class TradingHubVipParser : ISignalParser
 
             var asset = match.Groups[2].Value.ToUpper();
             var direction = match.Groups[1].Value.ToUpper() == "BUY" ? TradeDirection.Buy : TradeDirection.Sell;
-            var entry = decimal.Parse(match.Groups[3].Value);
-            var sl = decimal.Parse(match.Groups[4].Value);
-            var tp = decimal.Parse(match.Groups[5].Value);
+            var entry = decimal.Parse(match.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture);
+            var sl = decimal.Parse(match.Groups[4].Value, System.Globalization.CultureInfo.InvariantCulture);
+            var tp = decimal.Parse(match.Groups[5].Value, System.Globalization.CultureInfo.InvariantCulture);
 
             _logger.LogInformation("TradingHubVipParser: Parsed - {Asset} {Direction} @ {Entry}, TP: {TP}, SL: {SL}",
                 asset, direction, entry, tp, sl);

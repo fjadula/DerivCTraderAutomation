@@ -241,8 +241,8 @@ public class SqlServerTradeRepository : ITradeRepository
     public async Task<int> EnqueueTradeAsync(TradeExecutionQueue queueItem)
     {
         const string sql = @"
-            INSERT INTO TradeExecutionQueue (CTraderOrderId, Asset, Direction, StrategyName, IsOpposite, CreatedAt)
-            VALUES (@CTraderOrderId, @Asset, @Direction, @StrategyName, @IsOpposite, @CreatedAt);
+            INSERT INTO TradeExecutionQueue (CTraderOrderId, Asset, Direction, StrategyName, ProviderChannelId, IsOpposite, DerivContractId, CreatedAt)
+            VALUES (@CTraderOrderId, @Asset, @Direction, @StrategyName, @ProviderChannelId, @IsOpposite, @DerivContractId, @CreatedAt);
             SELECT CAST(SCOPE_IDENTITY() as int);";
 
         using var connection = CreateConnection();
@@ -344,9 +344,6 @@ public class SqlServerTradeRepository : ITradeRepository
     {
         const string sql = @"
             SELECT * FROM TradeExecutionQueue 
-            WHERE Platform = 'Deriv' 
-              AND Outcome IS NULL
-              AND SettledAt IS NULL
             ORDER BY CreatedAt ASC";
 
         using var connection = CreateConnection();

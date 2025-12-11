@@ -47,21 +47,35 @@ public static class DerivAssetMapper
 {
     private static readonly Dictionary<string, string> AssetMap = new(StringComparer.OrdinalIgnoreCase)
     {
-        // Major Forex Pairs
+        // Major Forex Pairs (both with and without slashes)
         ["EURUSD"] = "frxEURUSD",
+        ["EUR/USD"] = "frxEURUSD",
         ["GBPUSD"] = "frxGBPUSD",
+        ["GBP/USD"] = "frxGBPUSD",
         ["USDJPY"] = "frxUSDJPY",
+        ["USD/JPY"] = "frxUSDJPY",
         ["AUDUSD"] = "frxAUDUSD",
+        ["AUD/USD"] = "frxAUDUSD",
         ["USDCAD"] = "frxUSDCAD",
+        ["USD/CAD"] = "frxUSDCAD",
         ["USDCHF"] = "frxUSDCHF",
+        ["USD/CHF"] = "frxUSDCHF",
         ["NZDUSD"] = "frxNZDUSD",
+        ["NZD/USD"] = "frxNZDUSD",
 
-        // Cross Pairs
+        // Cross Pairs (both with and without slashes)
         ["EURJPY"] = "frxEURJPY",
+        ["EUR/JPY"] = "frxEURJPY",
         ["EURGBP"] = "frxEURGBP",
+        ["EUR/GBP"] = "frxEURGBP",
         ["GBPJPY"] = "frxGBPJPY",
+        ["GBP/JPY"] = "frxGBPJPY",
         ["AUDJPY"] = "frxAUDJPY",
+        ["AUD/JPY"] = "frxAUDJPY",
         ["EURAUD"] = "frxEURAUD",
+        ["EUR/AUD"] = "frxEURAUD",
+        ["EURCAD"] = "frxEURCAD",
+        ["EUR/CAD"] = "frxEURCAD",
 
         // Volatility Indices
         ["Volatility 10 Index"] = "R_10",
@@ -69,6 +83,11 @@ public static class DerivAssetMapper
         ["Volatility 50 Index"] = "R_50",
         ["Volatility 75 Index"] = "R_75",
         ["Volatility 100 Index"] = "R_100",
+        ["VOLATILITY10"] = "R_10",
+        ["VOLATILITY25"] = "R_25",
+        ["VOLATILITY50"] = "R_50",
+        ["VOLATILITY75"] = "R_75",
+        ["VOLATILITY100"] = "R_100",
         ["V10"] = "R_10",
         ["V25"] = "R_25",
         ["V50"] = "R_50",
@@ -115,8 +134,20 @@ public static class DerivAssetMapper
         if (match.Key != null)
             return match.Value;
 
-        // If no match, assume it's already a Deriv symbol
-        return asset;
+        // Fallback: Remove slashes/spaces and check if it's a forex pair
+        string cleanedAsset = asset.Replace("/", "").Replace(" ", "").Trim().ToUpper();
+        
+        // If cleaned asset looks like a forex pair (6-7 uppercase letters)
+        // and doesn't have a prefix, add frx
+        if (cleanedAsset.Length >= 6 && cleanedAsset.Length <= 7 && 
+            cleanedAsset.All(char.IsLetter) &&
+            !cleanedAsset.StartsWith("frx", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"frx{cleanedAsset}";
+        }
+
+        // If no match, return cleaned asset
+        return cleanedAsset;
     }
 
     /// <summary>
