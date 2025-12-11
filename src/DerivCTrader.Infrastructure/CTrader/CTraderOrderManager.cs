@@ -17,16 +17,19 @@ public class CTraderOrderManager : ICTraderOrderManager
 {
     private readonly ILogger<CTraderOrderManager> _logger;
     private readonly ICTraderClient _client;
+    private readonly ICTraderSymbolService _symbolService;
     private readonly IConfiguration _configuration;
     private readonly double _defaultLotSize;
 
     public CTraderOrderManager(
         ILogger<CTraderOrderManager> logger,
         ICTraderClient client,
+        ICTraderSymbolService symbolService,
         IConfiguration configuration)
     {
         _logger = logger;
         _client = client;
+        _symbolService = symbolService;
         _configuration = configuration;
         
         // 🔧 FIX: Use InvariantCulture for decimal parsing
@@ -162,9 +165,16 @@ public class CTraderOrderManager : ICTraderOrderManager
 
     private long GetSymbolId(string asset)
     {
-        // TODO: Implement proper symbol mapping
-        // For now, return a placeholder
-        return 1;
+        // Use the symbol service to get the correct symbol ID
+        try
+        {
+            return _symbolService.GetSymbolId(asset);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get symbol ID for {Asset}", asset);
+            throw new ArgumentException($"Unknown or unsupported symbol: {asset}", ex);
+        }
     }
 
     private long CalculateVolume(ParsedSignal signal)

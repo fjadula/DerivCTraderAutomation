@@ -201,15 +201,18 @@ public class DerivBinaryExecutorService : BackgroundService
         Console.WriteLine();
     }
 
-    private string MapDirection(string cTraderDirection)
+    private string MapDirection(string direction)
     {
+        // Handle both cTrader directions (Buy/Sell) and pure binary directions (CALL/PUT)
         // cTrader uses: Buy/Sell
         // Deriv uses: CALL/PUT
-        return cTraderDirection.ToUpper() switch
+        return direction.ToUpper() switch
         {
             "BUY" => "CALL",
             "SELL" => "PUT",
-            _ => throw new ArgumentException($"Unknown direction: {cTraderDirection}")
+            "CALL" => "CALL",   // Already in Deriv format (from pure binary signals)
+            "PUT" => "PUT",     // Already in Deriv format (from pure binary signals)
+            _ => throw new ArgumentException($"Unknown direction: {direction}")
         };
     }
 }
