@@ -7,9 +7,10 @@ public class ProtoOANewOrderReq : IMessage<ProtoOANewOrderReq>
 {
     public long CtidTraderAccountId { get; set; }
     public long SymbolId { get; set; }
-    public string OrderType { get; set; } = string.Empty;
-    public string TradeSide { get; set; } = string.Empty;
+    public int OrderType { get; set; } // 1=MARKET, 2=LIMIT, 3=STOP, etc.
+    public int TradeSide { get; set; } // 1=BUY, 2=SELL
     public long Volume { get; set; }
+    public decimal? LimitPrice { get; set; }
     public decimal StopPrice { get; set; }
     public decimal? StopLoss { get; set; }
     public decimal? TakeProfit { get; set; }
@@ -28,17 +29,21 @@ public class ProtoOANewOrderReq : IMessage<ProtoOANewOrderReq>
         {
             size += 1 + CodedOutputStream.ComputeInt64Size(SymbolId);
         }
-        if (OrderType.Length != 0)
+        if (OrderType != 0)
         {
-            size += 1 + CodedOutputStream.ComputeStringSize(OrderType);
+            size += 1 + CodedOutputStream.ComputeInt32Size(OrderType);
         }
-        if (TradeSide.Length != 0)
+        if (TradeSide != 0)
         {
-            size += 1 + CodedOutputStream.ComputeStringSize(TradeSide);
+            size += 1 + CodedOutputStream.ComputeInt32Size(TradeSide);
         }
         if (Volume != 0)
         {
             size += 1 + CodedOutputStream.ComputeInt64Size(Volume);
+        }
+        if (LimitPrice.HasValue)
+        {
+            size += 1 + sizeof(double);
         }
         // StopPrice is not used in our implementation - always skip it
         // if (StopPrice != 0)
@@ -69,6 +74,7 @@ public class ProtoOANewOrderReq : IMessage<ProtoOANewOrderReq>
             OrderType = OrderType,
             TradeSide = TradeSide,
             Volume = Volume,
+            LimitPrice = LimitPrice,
             StopPrice = StopPrice,
             StopLoss = StopLoss,
             TakeProfit = TakeProfit,
@@ -88,8 +94,8 @@ public class ProtoOANewOrderReq : IMessage<ProtoOANewOrderReq>
         if (message == null) return;
         if (message.CtidTraderAccountId != 0) CtidTraderAccountId = message.CtidTraderAccountId;
         if (message.SymbolId != 0) SymbolId = message.SymbolId;
-        if (message.OrderType.Length != 0) OrderType = message.OrderType;
-        if (message.TradeSide.Length != 0) TradeSide = message.TradeSide;
+        if (message.OrderType != 0) OrderType = message.OrderType;
+        if (message.TradeSide != 0) TradeSide = message.TradeSide;
         if (message.Volume != 0) Volume = message.Volume;
     }
 
@@ -100,44 +106,46 @@ public class ProtoOANewOrderReq : IMessage<ProtoOANewOrderReq>
 
     public void WriteTo(CodedOutputStream output)
     {
+        // Field 1: ctidTraderAccountId (required)
         if (CtidTraderAccountId != 0)
         {
             output.WriteRawTag(8); // Field 1, wire type 0 (varint)
             output.WriteInt64(CtidTraderAccountId);
         }
+        // Field 2: symbolId (required)
         if (SymbolId != 0)
         {
             output.WriteRawTag(16); // Field 2, wire type 0 (varint)
             output.WriteInt64(SymbolId);
         }
-        if (OrderType.Length != 0)
+        // Field 3: orderType (required) - ALWAYS send as enum int
+        output.WriteRawTag(24); // Field 3, wire type 0 (varint)
+        output.WriteInt32(OrderType);
+        
+        // Field 4: tradeSide (required) - ALWAYS send as enum int
+        output.WriteRawTag(32); // Field 4, wire type 0 (varint)
+        output.WriteInt32(TradeSide);
+        
+        // Field 5: volume (required) - ALWAYS send
+        output.WriteRawTag(40); // Field 5, wire type 0 (varint)
+        output.WriteInt64(Volume);
+        
+        // Field 6: limitPrice (optional double) - for LIMIT orders
+        if (LimitPrice.HasValue)
         {
-            output.WriteRawTag(26); // Field 3, wire type 2 (length-delimited)
-            output.WriteString(OrderType);
+            output.WriteRawTag(49); // Field 6, wire type 1 (fixed64)
+            output.WriteDouble((double)LimitPrice.Value);
         }
-        if (TradeSide.Length != 0)
-        {
-            output.WriteRawTag(34); // Field 4, wire type 2 (length-delimited)
-            output.WriteString(TradeSide);
-        }
-        if (Volume != 0)
-        {
-            output.WriteRawTag(40); // Field 5, wire type 0 (varint)
-            output.WriteInt64(Volume);
-        }
-        if (StopPrice != 0)
-        {
-            output.WriteRawTag(57); // Field 7, wire type 1 (fixed64/double)
-            output.WriteDouble((double)StopPrice);
-        }
+        // Field 10: stopLoss (optional double)
         if (StopLoss.HasValue)
         {
-            output.WriteRawTag(65); // Field 8, wire type 1 (fixed64/double)
+            output.WriteRawTag(81); // Field 10, wire type 1 (fixed64)
             output.WriteDouble((double)StopLoss.Value);
         }
+        // Field 11: takeProfit (optional double)
         if (TakeProfit.HasValue)
         {
-            output.WriteRawTag(73); // Field 9, wire type 1 (fixed64/double)
+            output.WriteRawTag(89); // Field 11, wire type 1 (fixed64)
             output.WriteDouble((double)TakeProfit.Value);
         }
         if (!string.IsNullOrEmpty(Label))

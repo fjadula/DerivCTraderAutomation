@@ -86,6 +86,19 @@ public class CTraderSymbolInitializerService : BackgroundService
                 else
                 {
                     Console.WriteLine("✅ Account authenticated");
+
+                    // Optional: Reconcile can be enabled via config.
+                    // Some environments drop the TCP connection immediately after reconcile.
+                    var enableReconcile = _configuration.GetValue("CTrader:EnableReconcile", false);
+                    if (enableReconcile)
+                    {
+                        Console.WriteLine("🔄 Reconciling account stream...");
+                        var reconciled = await _client.ReconcileAsync(stoppingToken);
+                        if (!reconciled)
+                        {
+                            Console.WriteLine("⚠️  Reconcile did not complete; some event streams may not work");
+                        }
+                    }
                 }
             }
             catch (Exception ex)
@@ -95,43 +108,29 @@ public class CTraderSymbolInitializerService : BackgroundService
                 Console.WriteLine("⚠️  Continuing without account - pending orders will not work");
             }
 
-            // Symbol service already initialized with common symbols
-            // Skip account list and symbol fetching since we have hardcoded mappings
-            Console.WriteLine("\n📥 cTrader Symbol Information:");
-            Console.WriteLine("════════════════════════════════════════");
-            Console.WriteLine($"\n✅ Symbol service initialized with all supported symbols");
-            Console.WriteLine("\n💱 Forex Pairs (28 symbols):");
-            Console.WriteLine("   • EURUSD, GBPUSD, USDJPY, USDCHF, AUDUSD, USDCAD");
-            Console.WriteLine("   • NZDUSD, EURGBP, EURJPY, GBPJPY, EURCHF, EURAUD");
-            Console.WriteLine("   • EURCAD, GBPCHF, GBPAUD, GBPCAD, AUDJPY, AUDNZD");
-            Console.WriteLine("   • AUDCHF, AUDCAD, NZDJPY, CHFJPY, CADJPY, CADCHF");
-            Console.WriteLine("   • GBPNZD, EURNZD, NZDCHF, NZDCAD");
-            
-            Console.WriteLine("\n📊 Deriv Synthetic Indices (Binary Trading Supported):");
-            Console.WriteLine("\n   Continuous Volatility Indices:");
-            Console.WriteLine("   • V10, V15, V25, V30, V50, V75, V90, V100");
-            Console.WriteLine("   • V10 (1s), V15 (1s), V25 (1s), V50 (1s), V75 (1s), V100 (1s)");
-            
-            Console.WriteLine("\n   Jump Indices:");
-            Console.WriteLine("   • Jump 10, Jump 25, Jump 50, Jump 75, Jump 100");
-            
-            Console.WriteLine("\n   Range Break Indices:");
-            Console.WriteLine("   • Range Break 100, Range Break 200");
-            
-            Console.WriteLine("\n   Step Indices:");
-            Console.WriteLine("   • Step 100, Step 200, Step 300, Step 400, Step 500");
-            
-            Console.WriteLine("\n   Daily Reset Indices:");
-            Console.WriteLine("   • Bear Market Index, Bull Market Index");
-            
-            Console.WriteLine("\n⚠️  NOT SUPPORTED (No Binary Trading):");
-            Console.WriteLine("   • Boom indices (300, 500, 600, 900, 1000)");
-            Console.WriteLine("   • Crash indices (300, 500, 600, 900, 1000)");
-            
-            Console.WriteLine("\n📝 Symbol Name Format:");
-            Console.WriteLine("   • Forex: No slash (EURUSD not EUR/USD)");
-            Console.WriteLine("   • Synthetics: Multiple formats supported (V75, VOLATILITY75, etc.)");
-            Console.WriteLine("════════════════════════════════════════\n");
+            // Step 4: Fetch actual symbol list (dynamic IDs)
+            if (_client.IsAccountAuthenticated)
+            {
+                Console.WriteLine("\n📥 Fetching cTrader symbols (dynamic IDs)...");
+                try
+                {
+                    await _symbolService.InitializeAsync();
+                    Console.WriteLine("✅ Symbol list fetched from cTrader");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogCritical(ex, "Failed to fetch symbol list from cTrader; stopping to avoid wrong trades");
+                    Console.WriteLine($"❌ Failed to fetch symbols: {ex.Message}");
+                    Console.WriteLine("❌ Stopping application to prevent trading with incorrect SymbolId mappings");
+                    _lifetime.StopApplication();
+                    return;
+                }
+            }
+            else
+            {
+                _logger.LogWarning("Skipping symbol fetch because account is not authenticated");
+                Console.WriteLine("⚠️  Skipping symbol fetch (account not authenticated)");
+            }
 
             _logger.LogInformation("✅ cTrader client authenticated and symbols ready");
             Console.WriteLine("✅ cTrader client authenticated and symbols ready");

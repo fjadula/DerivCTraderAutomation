@@ -3,6 +3,8 @@ using DerivCTrader.Domain.Entities;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using System.Net.Http;
+using Tesseract;
 using TL;
 using WTelegram;
 
@@ -17,6 +19,9 @@ public class TelegramSignalScraperService : BackgroundService
     private Client? _client1;
     private Client? _client2;
     private readonly Dictionary<long, string> _channelMappings;
+
+    private static readonly HttpClient Http = new();
+    private static readonly SemaphoreSlim OcrLock = new(1, 1);
 
     public TelegramSignalScraperService(
         ILogger<TelegramSignalScraperService> logger,
@@ -109,6 +114,14 @@ public class TelegramSignalScraperService : BackgroundService
             // Start listening for messages
             await ListenForMessagesAsync(stoppingToken);
         }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            _logger.LogInformation("Telegram Signal Scraper stopping (cancellation requested)");
+        }
+        catch (TaskCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            _logger.LogInformation("Telegram Signal Scraper stopping (task cancelled)");
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Fatal error in Telegram Signal Scraper");
@@ -118,7 +131,7 @@ public class TelegramSignalScraperService : BackgroundService
             // Keep running so the host doesn't exit
             while (!stoppingToken.IsCancellationRequested)
             {
-                await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
+                await Task.Delay(TimeSpan.FromMinutes(1), CancellationToken.None);
             }
         }
     }
@@ -214,7 +227,7 @@ public class TelegramSignalScraperService : BackgroundService
             {
                 foreach (var update in updates.UpdateList)
                 {
-                    await HandleUpdateAsync(update, stoppingToken);
+                    await HandleUpdateAsync(_client1, update, stoppingToken);
                 }
             }
             catch (Exception ex)
@@ -232,7 +245,7 @@ public class TelegramSignalScraperService : BackgroundService
                 {
                     foreach (var update in updates.UpdateList)
                     {
-                        await HandleUpdateAsync(update, stoppingToken);
+                        await HandleUpdateAsync(_client2, update, stoppingToken);
                     }
                 }
                 catch (Exception ex)
@@ -253,13 +266,20 @@ public class TelegramSignalScraperService : BackgroundService
         Console.WriteLine("=== ENTERING INFINITE LOOP ===");
         while (!stoppingToken.IsCancellationRequested)
         {
-            await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
         }
 
         Console.WriteLine("=== CANCELLATION REQUESTED, EXITING ===");
     }
 
-    private async Task HandleUpdateAsync(Update update, CancellationToken cancellationToken)
+    private async Task HandleUpdateAsync(Client? client, Update update, CancellationToken cancellationToken)
     {
         try
         {
@@ -318,7 +338,23 @@ public class TelegramSignalScraperService : BackgroundService
                 byte[]? imageData = null;
                 if (message.media is MessageMediaPhoto { photo: Photo photo })
                 {
-                    imageData = await DownloadPhotoAsync(photo);
+                    imageData = await DownloadPhotoAsync(client, photo, cancellationToken);
+
+                    // If the message is image-only (common in copy-protected channels), OCR it
+                    if (string.IsNullOrWhiteSpace(messageText) && imageData != null)
+                    {
+                        var ocrText = await TryOcrAsync(imageData, cancellationToken);
+                        if (!string.IsNullOrWhiteSpace(ocrText))
+                        {
+                            messageText = ocrText;
+                            _logger.LogInformation("🧾 OCR extracted text (len={Len})", ocrText.Length);
+                            Console.WriteLine($"🧾 OCR TEXT:\n{ocrText}\n");
+                        }
+                        else
+                        {
+                            _logger.LogWarning("OCR returned empty text for photo message");
+                        }
+                    }
                 }
 
                 // Find appropriate parser
@@ -392,10 +428,86 @@ public class TelegramSignalScraperService : BackgroundService
         }
     }
 
-    private async Task<byte[]?> DownloadPhotoAsync(Photo photo)
+    private async Task<byte[]?> DownloadPhotoAsync(Client? client, Photo photo, CancellationToken cancellationToken)
     {
-        // Placeholder implementation
-        return await Task.FromResult<byte[]?>(null);
+        if (client == null)
+        {
+            _logger.LogWarning("DownloadPhotoAsync called but client was null");
+            return null;
+        }
+
+        try
+        {
+            await using var ms = new MemoryStream();
+            // WTelegram helper: download full photo content
+            await client.DownloadFileAsync(photo, ms, progress: (_, __) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            });
+
+            return ms.ToArray();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to download photo from Telegram");
+            return null;
+        }
+    }
+
+    private async Task<string?> TryOcrAsync(byte[] imageData, CancellationToken cancellationToken)
+    {
+        // OCR is optional: it will attempt to download eng.traineddata automatically if missing
+        // and then run Tesseract over the image bytes.
+
+        await OcrLock.WaitAsync(cancellationToken);
+        try
+        {
+            var baseDir = AppContext.BaseDirectory;
+            var tessdataDir = Path.Combine(baseDir, "tessdata");
+            Directory.CreateDirectory(tessdataDir);
+
+            var trainedDataPath = Path.Combine(tessdataDir, "eng.traineddata");
+            if (!File.Exists(trainedDataPath))
+            {
+                // Use tessdata_fast for smaller download
+                var url = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata";
+                _logger.LogInformation("Downloading OCR traineddata: {Url}", url);
+                using var resp = await Http.GetAsync(url, cancellationToken);
+                resp.EnsureSuccessStatusCode();
+                var bytes = await resp.Content.ReadAsByteArrayAsync(cancellationToken);
+                await File.WriteAllBytesAsync(trainedDataPath, bytes, cancellationToken);
+                _logger.LogInformation("Downloaded OCR traineddata to {Path}", trainedDataPath);
+            }
+
+            using var engine = new TesseractEngine(tessdataDir, "eng", EngineMode.Default);
+            using var pix = Pix.LoadFromMemory(imageData);
+            using var page = engine.Process(pix);
+
+            var text = page.GetText();
+            if (string.IsNullOrWhiteSpace(text))
+                return null;
+
+            // Normalize whitespace a bit for regex parsers
+            text = text.Replace("\r\n", "\n").Replace("\r", "\n");
+            return text.Trim();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "OCR failed");
+            return null;
+        }
+        finally
+        {
+            OcrLock.Release();
+        }
     }
 
     public override void Dispose()

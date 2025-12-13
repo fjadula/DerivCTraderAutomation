@@ -32,4 +32,9 @@ public interface ICTraderOrderManager
     /// Get current market price for a symbol
     /// </summary>
     Task<double?> GetCurrentPriceAsync(string symbol);
+
+    /// <summary>
+    /// Get current bid/ask for a symbol (when available)
+    /// </summary>
+    Task<(double? Bid, double? Ask)> GetCurrentBidAskAsync(string symbol);
 }

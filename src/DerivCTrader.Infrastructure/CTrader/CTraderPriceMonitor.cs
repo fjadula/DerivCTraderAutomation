@@ -3,6 +3,9 @@ using DerivCTrader.Domain.Enums;
 using DerivCTrader.Infrastructure.CTrader.Interfaces;
 using DerivCTrader.Infrastructure.CTrader.Models;
 using Microsoft.Extensions.Logging;
+using OpenAPI.Net;
+
+using PayloadType = DerivCTrader.Infrastructure.CTrader.Models.ProtoOAPayloadType;
 
 namespace DerivCTrader.Infrastructure.CTrader;
 
@@ -12,14 +15,18 @@ namespace DerivCTrader.Infrastructure.CTrader;
 public class CTraderPriceMonitor : ICTraderPriceMonitor
 {
     private readonly ICTraderClient _client;
+    private readonly ICTraderSymbolService _symbolService;
     private readonly ILogger<CTraderPriceMonitor> _logger;
     private readonly Dictionary<long, PendingOrderWatch> _watchedOrders = new();
+    private readonly HashSet<long> _subscribedSymbols = new();
+    private readonly SemaphoreSlim _subscriptionLock = new(1, 1);
 
     public event EventHandler<OrderCrossedEventArgs>? OrderCrossed;
 
-    public CTraderPriceMonitor(ICTraderClient client, ILogger<CTraderPriceMonitor> logger)
+    public CTraderPriceMonitor(ICTraderClient client, ICTraderSymbolService symbolService, ILogger<CTraderPriceMonitor> logger)
     {
         _client = client;
+        _symbolService = symbolService;
         _logger = logger;
 
         // Subscribe to price updates
@@ -29,17 +36,20 @@ public class CTraderPriceMonitor : ICTraderPriceMonitor
     /// <summary>
     /// Start watching a pending order for price cross
     /// </summary>
-    public void WatchOrder(long orderId, long symbolId, ParsedSignal signal)
+    public void WatchOrder(long orderId, long symbolId, ParsedSignal signal, bool isOpposite = false)
     {
         var watch = new PendingOrderWatch
         {
             OrderId = orderId,
             SymbolId = symbolId,
             Signal = signal,
+            IsOpposite = isOpposite,
             CreatedAt = DateTime.UtcNow
         };
 
         _watchedOrders[orderId] = watch;
+
+        _ = EnsureSubscribedAsync(symbolId);
 
         _logger.LogInformation("👁️ Watching order {OrderId}: {Asset} {Direction} @ {Entry}",
             orderId, signal.Asset, signal.Direction, signal.EntryPrice);
@@ -64,7 +74,7 @@ public class CTraderPriceMonitor : ICTraderPriceMonitor
     private void OnMessageReceived(object? sender, CTraderMessage message)
     {
         // Check if this is a spot event (price tick)
-        if (message.PayloadType == (int)ProtoOAPayloadType.ProtoOaSpotEvent)
+        if (message.PayloadType == (int)PayloadType.ProtoOaSpotEvent)
         {
             ProcessSpotEvent(message);
         }
@@ -93,6 +103,7 @@ public class CTraderPriceMonitor : ICTraderPriceMonitor
                     {
                         OrderId = watch.OrderId,
                         Signal = watch.Signal,
+                        IsOpposite = watch.IsOpposite,
                         ExecutionPrice = GetExecutionPrice(watch, spotEvent)
                     });
 
@@ -147,14 +158,116 @@ public class CTraderPriceMonitor : ICTraderPriceMonitor
 
     private SpotEventData ParseSpotEvent(byte[] payload)
     {
-        // TODO: Implement proper Protobuf parsing for ProtoOASpotEvent
-        // For now, return mock data
+        // Spot events are sent as inner protobuf payload of ProtoOASpotEvent (PayloadType=2136)
+        var spot = ProtoOASpotEvent.Parser.ParseFrom(payload);
+
+        // Use reflection to tolerate minor schema/version differences.
+        var spotObj = (object)spot;
+        var spotType = spotObj.GetType();
+
+        var symbolIdObj = spotType.GetProperty("SymbolId")?.GetValue(spotObj);
+        var symbolId = symbolIdObj is null ? 0L : Convert.ToInt64(symbolIdObj);
+
+        var bidObj = spotType.GetProperty("Bid")?.GetValue(spotObj);
+        var askObj = spotType.GetProperty("Ask")?.GetValue(spotObj);
+
+        var bid = NormalizePrice(symbolId, bidObj);
+        var ask = NormalizePrice(symbolId, askObj);
+
+        var tsObj =
+            spotType.GetProperty("Timestamp")?.GetValue(spotObj) ??
+            spotType.GetProperty("UtcTimestamp")?.GetValue(spotObj);
+        var ts = tsObj is null ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() : Convert.ToInt64(tsObj);
+
         return new SpotEventData
         {
-            SymbolId = 1,
-            Bid = 1.0850,
-            Ask = 1.0852,
-            Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            SymbolId = symbolId,
+            Bid = bid,
+            Ask = ask,
+            Timestamp = ts
         };
+    }
+
+    private double NormalizePrice(long symbolId, object? raw)
+    {
+        if (raw is null)
+            return 0;
+
+        if (raw is double d)
+            return d;
+
+        if (raw is float f)
+            return f;
+
+        if (raw is decimal m)
+            return (double)m;
+
+        // Fixed-point integer path (common in some Open API streams)
+        var asLong = Convert.ToInt64(raw);
+
+        if (_symbolService.TryGetSymbolDigits(symbolId, out var digits) && digits > 0)
+        {
+            return asLong / Math.Pow(10, digits);
+        }
+
+        // Fallback heuristic: FX often arrives as price * 100000
+        if (Math.Abs(asLong) > 1000)
+        {
+            return asLong / 100000d;
+        }
+
+        return asLong;
+    }
+
+    private async Task EnsureSubscribedAsync(long symbolId)
+    {
+        if (symbolId <= 0)
+            return;
+
+        if (_subscribedSymbols.Contains(symbolId))
+            return;
+
+        await _subscriptionLock.WaitAsync();
+        try
+        {
+            if (_subscribedSymbols.Contains(symbolId))
+                return;
+
+            if (!_client.IsConnected || !_client.IsAccountAuthenticated)
+            {
+                _logger.LogWarning("Cannot subscribe to spots; cTrader client not connected/account-authenticated");
+                return;
+            }
+
+            var req = new ProtoOASubscribeSpotsReq
+            {
+                CtidTraderAccountId = _client.AccountId
+            };
+            req.SymbolId.Add(symbolId);
+
+            _logger.LogInformation("📡 Subscribing to spot events: SymbolId={SymbolId}", symbolId);
+            await _client.SendMessageAsync(req, PayloadType.ProtoOaSubscribeSpotsReq);
+
+            var res = await _client.WaitForResponseAsync<byte[]>(
+                (int)PayloadType.ProtoOaSubscribeSpotsRes,
+                TimeSpan.FromSeconds(10));
+
+            if (res == null)
+            {
+                _logger.LogWarning("Spot subscription timed out for SymbolId={SymbolId}", symbolId);
+                return;
+            }
+
+            _subscribedSymbols.Add(symbolId);
+            _logger.LogInformation("✅ Spot subscription confirmed for SymbolId={SymbolId}", symbolId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to subscribe to spot events for SymbolId={SymbolId}", symbolId);
+        }
+        finally
+        {
+            _subscriptionLock.Release();
+        }
     }
 }

@@ -66,10 +66,21 @@ public class BinaryExecutionService : BackgroundService
                 await ProcessUnprocessedSignalsAsync(stoppingToken);
                 await Task.Delay(TimeSpan.FromSeconds(_pollIntervalSeconds), stoppingToken);
             }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error in binary execution loop");
-                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
             }
         }
 
@@ -179,14 +190,14 @@ public class BinaryExecutionService : BackgroundService
 
     private int CalculateExpiry(ParsedSignal signal)
     {
-        // Volatility indices: 15 minutes
+        // Enforce minimum 30 minutes for current strategy requirements
         if (signal.Asset.Contains("VIX", StringComparison.OrdinalIgnoreCase) ||
             signal.Asset.Contains("Volatility", StringComparison.OrdinalIgnoreCase))
         {
-            return 15;
+            return 30;
         }
 
-        // Forex/Commodities: 21 minutes (Deriv minimum)
-        return 21;
+        // Forex/Commodities: 30 minutes minimum
+        return 30;
     }
 }

@@ -33,7 +33,7 @@ public class PerfectFxParser : ISignalParser
             _logger.LogInformation("PerfectFxParser: Message: {Message}", message);
 
             // PERFECTFX format: "AUDUSD BUY AT 0.65156 TP 0.67392 SL 0.64429"
-            var pattern = @"(\w+)\s+(BUY|SELL)\s+AT\s+([\d.]+)\s+TP\s+([\d.]+)\s+SL\s+([\d.]+)";
+            var pattern = @"(\w+)\s+(BUY|SELL)\s+AT\s+([\d.]+)(?:\s+TP\s+([\d.]+))?(?:\s+SL\s+([\d.]+))?";
             var match = Regex.Match(message, pattern, RegexOptions.Singleline | RegexOptions.IgnoreCase);
 
             if (!match.Success)
@@ -47,8 +47,20 @@ public class PerfectFxParser : ISignalParser
             var asset = match.Groups[1].Value.ToUpper();
             var direction = match.Groups[2].Value.ToUpper() == "BUY" ? TradeDirection.Buy : TradeDirection.Sell;
             var entry = decimal.Parse(match.Groups[3].Value);
-            var tp = decimal.Parse(match.Groups[4].Value);
-            var sl = decimal.Parse(match.Groups[5].Value);
+            decimal? tp = null;
+            decimal? sl = null;
+            if (decimal.TryParse(match.Groups[4].Value, out var parsedTp))
+                tp = parsedTp;
+            if (decimal.TryParse(match.Groups[5].Value, out var parsedSl))
+                sl = parsedSl;
+
+            // Fallback if TP/SL missing
+            decimal pipSize = asset.EndsWith("JPY") ? 0.01m : 0.0001m;
+            decimal pipOffset = pipSize * 30;
+            if (!tp.HasValue)
+                tp = direction == TradeDirection.Buy ? entry + pipOffset : entry - pipOffset;
+            if (!sl.HasValue)
+                sl = direction == TradeDirection.Buy ? entry - pipOffset : entry + pipOffset;
 
             _logger.LogInformation("PerfectFxParser: Parsed - {Asset} {Direction} @ {Entry}, TP: {TP}, SL: {SL}",
                 asset, direction, entry, tp, sl);

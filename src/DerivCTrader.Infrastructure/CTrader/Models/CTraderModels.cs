@@ -20,6 +20,7 @@ public class CTraderOrderResult
     public bool Success { get; set; }
     public long? OrderId { get; set; }
     public long? PositionId { get; set; }
+    public bool? SltpApplied { get; set; }
     public string? ErrorMessage { get; set; }
     public string? ErrorCode { get; set; }
     public double? ExecutedPrice { get; set; }

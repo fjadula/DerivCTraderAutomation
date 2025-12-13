@@ -19,7 +19,7 @@ public interface ICTraderPriceMonitor
     /// <param name="orderId">cTrader order ID</param>
     /// <param name="symbolId">cTrader symbol ID</param>
     /// <param name="signal">The trading signal with entry price</param>
-    void WatchOrder(long orderId, long symbolId, ParsedSignal signal);
+    void WatchOrder(long orderId, long symbolId, ParsedSignal signal, bool isOpposite = false);
 
     /// <summary>
     /// Stop watching an order (e.g., if cancelled)

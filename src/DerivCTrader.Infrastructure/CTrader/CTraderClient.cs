@@ -8,6 +8,10 @@ using Google.Protobuf;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
+using OpenAPI.Net;
+using OpenAPI.Net.Helpers;
+
+using PayloadType = DerivCTrader.Infrastructure.CTrader.Models.ProtoOAPayloadType;
 
 namespace DerivCTrader.Infrastructure.CTrader;
 
@@ -22,6 +26,8 @@ public class CTraderClient : ICTraderClient, IDisposable
     private Stream? _stream;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly Dictionary<int, TaskCompletionSource<byte[]>> _pendingResponses = new();
+    private readonly Dictionary<(int PayloadType, string ClientMsgId), TaskCompletionSource<byte[]>> _pendingResponsesByClientMsgId = new();
+    private readonly object _pendingResponsesLock = new();
     private CancellationTokenSource? _receiveCts;
     private Task? _receiveTask;
     
@@ -38,6 +44,7 @@ public class CTraderClient : ICTraderClient, IDisposable
     public bool IsConnected => _tcpClient?.Connected ?? false;
     public bool IsApplicationAuthenticated { get; private set; }
     public bool IsAccountAuthenticated { get; private set; }
+    public long AccountId => _accountId;
 
     public event EventHandler<bool>? ConnectionStateChanged;
     public event EventHandler<CTraderMessage>? MessageReceived;
@@ -170,11 +177,11 @@ public class CTraderClient : ICTraderClient, IDisposable
                 ClientSecret = _clientSecret
             };
 
-            await SendMessageAsync(authReq, (int)ProtoOAPayloadType.ProtoOaApplicationAuthReq, cancellationToken);
+            await SendMessageAsync(authReq, (int)PayloadType.ProtoOaApplicationAuthReq, cancellationToken);
             
             // Wait for response
             var response = await WaitForResponseAsync<ProtoOAApplicationAuthRes>(
-                (int)ProtoOAPayloadType.ProtoOaApplicationAuthRes,
+                (int)PayloadType.ProtoOaApplicationAuthRes,
                 TimeSpan.FromSeconds(10),
                 cancellationToken);
 
@@ -209,26 +216,26 @@ public class CTraderClient : ICTraderClient, IDisposable
                 AccessToken = _accessToken
             };
 
-            await SendMessageAsync(req, (int)ProtoOAPayloadType.ProtoOaGetAccountListByAccessTokenReq, cancellationToken);
+            await SendMessageAsync(req, (int)PayloadType.ProtoOaGetAccountListByAccessTokenReq, cancellationToken);
 
             var response = await WaitForResponseAsync<ProtoOAGetAccountListByAccessTokenRes>(
-                (int)ProtoOAPayloadType.ProtoOaGetAccountListByAccessTokenRes,
+                (int)PayloadType.ProtoOaGetAccountListByAccessTokenRes,
                 TimeSpan.FromSeconds(10),
                 cancellationToken);
 
             if (response != null)
             {
-                _logger.LogInformation("=== CTRADER: ✅ Found {Count} accounts ===", response.CtidTraderAccounts.Count);
-                Console.WriteLine($"=== CTRADER: ✅ Found {response.CtidTraderAccounts.Count} accounts ===");
+                _logger.LogInformation("=== CTRADER: ✅ Found {Count} accounts ===", response.CtidTraderAccount.Count);
+                Console.WriteLine($"=== CTRADER: ✅ Found {response.CtidTraderAccount.Count} accounts ===");
                 
-                foreach (var account in response.CtidTraderAccounts)
+                foreach (var account in response.CtidTraderAccount)
                 {
                     var accountType = account.IsLive ? "LIVE" : "DEMO";
                     _logger.LogInformation("  Account ID: {AccountId} ({Type})", account.CtidTraderAccountId, accountType);
                     Console.WriteLine($"  Account ID: {account.CtidTraderAccountId} ({accountType})");
                 }
                 
-                return response.CtidTraderAccounts;
+                return response.CtidTraderAccount.ToList();
             }
             else
             {
@@ -256,11 +263,11 @@ public class CTraderClient : ICTraderClient, IDisposable
                 AccessToken = _accessToken
             };
 
-            await SendMessageAsync(authReq, (int)ProtoOAPayloadType.ProtoOaAccountAuthReq, cancellationToken);
+            await SendMessageAsync(authReq, (int)PayloadType.ProtoOaAccountAuthReq, cancellationToken);
 
             // Wait for response
             var response = await WaitForResponseAsync<ProtoOAAccountAuthRes>(
-                (int)ProtoOAPayloadType.ProtoOaAccountAuthRes,
+                (int)PayloadType.ProtoOaAccountAuthRes,
                 TimeSpan.FromSeconds(10),
                 cancellationToken);
 
@@ -283,7 +290,54 @@ public class CTraderClient : ICTraderClient, IDisposable
         }
     }
 
+    public async Task<bool> ReconcileAsync(CancellationToken cancellationToken = default)
+    {
+        if (!IsConnected || !IsAccountAuthenticated)
+        {
+            _logger.LogWarning("Reconcile skipped: not connected/account-authenticated");
+            return false;
+        }
+
+        try
+        {
+            _logger.LogInformation("=== CTRADER: Reconciling account stream (AccountId={AccountId}) ===", _accountId);
+
+            var req = new ProtoOAReconcileReq
+            {
+                CtidTraderAccountId = _accountId
+            };
+
+            await SendMessageAsync(req, (int)PayloadType.ProtoOaReconcileReq, cancellationToken);
+
+            var res = await WaitForResponseAsync<ProtoOAReconcileRes>(
+                (int)PayloadType.ProtoOaReconcileRes,
+                TimeSpan.FromSeconds(10),
+                cancellationToken);
+
+            if (res == null)
+            {
+                _logger.LogWarning("Reconcile timed out or returned null (AccountId={AccountId})", _accountId);
+                return false;
+            }
+
+            _logger.LogInformation("=== CTRADER: ✅ Reconcile complete ===");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Reconcile failed");
+            return false;
+        }
+    }
+
     public async Task SendMessageAsync<T>(T message, int payloadType, CancellationToken cancellationToken = default)
+    {
+        // Preserve legacy behavior while always attaching a ClientMsgId for correlation.
+        // Callers that don't care can ignore the id.
+        _ = await SendMessageWithClientMsgIdAsync(message, payloadType, cancellationToken);
+    }
+
+    public async Task<string> SendMessageWithClientMsgIdAsync<T>(T message, int payloadType, CancellationToken cancellationToken = default)
     {
         if (_stream == null || !IsConnected)
             throw new InvalidOperationException("Not connected to cTrader");
@@ -307,7 +361,8 @@ public class CTraderClient : ICTraderClient, IDisposable
             var protoMsg = new ProtoMessage
             {
                 PayloadType = (uint)payloadType,
-                Payload = innerPayload
+                Payload = Google.Protobuf.ByteString.CopyFrom(innerPayload),
+                ClientMsgId = Guid.NewGuid().ToString("N")
             };
 
             var protoMsgBytes = protoMsg.ToByteArray();
@@ -333,6 +388,8 @@ public class CTraderClient : ICTraderClient, IDisposable
 
             _logger.LogDebug("Sent ProtoMessage: PayloadType={PayloadType}, InnerPayloadSize={InnerSize}, ProtoMessageSize={ProtoSize}", 
                 payloadType, innerPayload.Length, protoMsgBytes.Length);
+
+            return protoMsg.ClientMsgId!;
         }
         finally
         {
@@ -340,10 +397,18 @@ public class CTraderClient : ICTraderClient, IDisposable
         }
     }
 
+    public Task SendMessageAsync<T>(T message, PayloadType payloadType, CancellationToken cancellationToken = default)
+    {
+        return SendMessageAsync(message, (int)payloadType, cancellationToken);
+    }
+
     public async Task<T?> WaitForResponseAsync<T>(int payloadType, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
-        var tcs = new TaskCompletionSource<byte[]>();
-        _pendingResponses[payloadType] = tcs;
+        var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_pendingResponsesLock)
+        {
+            _pendingResponses[payloadType] = tcs;
+        }
 
         try
         {
@@ -351,6 +416,12 @@ public class CTraderClient : ICTraderClient, IDisposable
             cts.CancelAfter(timeout);
 
             var payload = await tcs.Task.WaitAsync(cts.Token);
+
+            // Allow callers to await raw payload bytes.
+            if (typeof(T) == typeof(byte[]))
+            {
+                return (T)(object)payload;
+            }
             
             // Deserialize based on type
             if (typeof(T).GetInterfaces().Contains(typeof(IMessage)))
@@ -366,12 +437,78 @@ public class CTraderClient : ICTraderClient, IDisposable
         }
         catch (OperationCanceledException)
         {
-            _logger.LogWarning("Timeout waiting for response: PayloadType={PayloadType}", payloadType);
+            // If the caller canceled, don't log as a timeout.
+            if (cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogDebug("Canceled waiting for response: PayloadType={PayloadType}", payloadType);
+            }
+            else
+            {
+                _logger.LogWarning("Timeout waiting for response: PayloadType={PayloadType}", payloadType);
+            }
             return default;
         }
         finally
         {
-            _pendingResponses.Remove(payloadType);
+            lock (_pendingResponsesLock)
+            {
+                _pendingResponses.Remove(payloadType);
+            }
+        }
+    }
+
+    public async Task<T?> WaitForResponseAsync<T>(int payloadType, string clientMsgId, TimeSpan timeout, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(clientMsgId))
+            throw new ArgumentException("clientMsgId is required", nameof(clientMsgId));
+
+        var key = (payloadType, clientMsgId);
+        var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        lock (_pendingResponsesLock)
+        {
+            _pendingResponsesByClientMsgId[key] = tcs;
+        }
+
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(timeout);
+
+            var payload = await tcs.Task.WaitAsync(cts.Token);
+
+            if (typeof(T) == typeof(byte[]))
+            {
+                return (T)(object)payload;
+            }
+
+            if (typeof(T).GetInterfaces().Contains(typeof(IMessage)))
+            {
+                var parser = typeof(T).GetProperty("Parser")?.GetValue(null) as MessageParser;
+                return (T?)parser?.ParseFrom(payload);
+            }
+
+            var json = Encoding.UTF8.GetString(payload);
+            return JsonConvert.DeserializeObject<T>(json);
+        }
+        catch (OperationCanceledException)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogDebug("Canceled waiting for response: PayloadType={PayloadType}, ClientMsgId={ClientMsgId}", payloadType, clientMsgId);
+            }
+            else
+            {
+                _logger.LogWarning("Timeout waiting for response: PayloadType={PayloadType}, ClientMsgId={ClientMsgId}", payloadType, clientMsgId);
+            }
+            return default;
+        }
+        finally
+        {
+            lock (_pendingResponsesLock)
+            {
+                _pendingResponsesByClientMsgId.Remove(key);
+            }
         }
     }
 
@@ -423,8 +560,9 @@ public class CTraderClient : ICTraderClient, IDisposable
                 _logger.LogDebug("Received ProtoMessage: PayloadType={PayloadType}, PayloadSize={Size}", 
                     protoMsg.PayloadType, protoMsg.Payload.Length);
 
-                // Process the inner payload
-                await ProcessMessageAsync((int)protoMsg.PayloadType, protoMsg.Payload, protoMsg.Payload.Length);
+                // Process the inner payload - convert ByteString to byte array
+                var payloadBytes = protoMsg.Payload.ToByteArray();
+                await ProcessMessageAsync((int)protoMsg.PayloadType, payloadBytes, payloadBytes.Length, protoMsg.ClientMsgId);
             }
         }
         catch (Exception ex)
@@ -450,32 +588,72 @@ public class CTraderClient : ICTraderClient, IDisposable
         return totalRead;
     }
 
-    private async Task ProcessMessageAsync(int payloadType, byte[] buffer, int length)
+    private async Task ProcessMessageAsync(int payloadType, byte[] buffer, int length, string? clientMsgId)
     {
         try
         {
             // payload already separated; buffer is payload only
             var payload = buffer;
 
-            _logger.LogDebug("Received message: PayloadType={PayloadType}, Size={Size}", payloadType, length);
+            // Some server environments appear to send payload types that don't match the official docs.
+            // We normalize known mismatches so consumers waiting on official payload types still work.
+            // Observed: SubscribeSpotsRes can arrive as 2142 instead of 2121.
+            var normalizedPayloadType = payloadType;
+            if (payloadType == 2142)
+            {
+                try
+                {
+                    _ = ProtoOASubscribeSpotsRes.Parser.ParseFrom(payload);
+                    normalizedPayloadType = (int)PayloadType.ProtoOaSubscribeSpotsRes;
+                }
+                catch
+                {
+                    // Not a SubscribeSpotsRes; keep original payload type.
+                }
+            }
+
+            _logger.LogInformation("📨 Received message: PayloadType={PayloadType}, Size={Size}", payloadType, length);
+
+            // In our environment, cTrader returns order failures as PayloadType=2132.
+            // Log and attempt to parse as ErrorRes so the real rejection reason is visible.
+            if (payloadType == 2132)
+            {
+                _logger.LogWarning("🔍 PayloadType 2132 received - Hex: {Hex}", BitConverter.ToString(payload).Replace("-", " "));
+
+                try
+                {
+                    var (errorCode, description, accountId) = TryParseErrorRes(payload);
+                    if (!string.IsNullOrWhiteSpace(errorCode) || !string.IsNullOrWhiteSpace(description))
+                    {
+                        _logger.LogError("=== CTRADER ERROR (2132) ===");
+                        _logger.LogError("ErrorCode: {ErrorCode}", errorCode);
+                        _logger.LogError("Description: {Description}", description);
+                        _logger.LogError("AccountId: {AccountId}", accountId);
+                    }
+                }
+                catch
+                {
+                    // Best-effort parsing only
+                }
+            }
 
             // Check for error responses and log them
-            if (payloadType == (int)ProtoOAPayloadType.ProtoOaErrorRes)
+            if (payloadType == (int)PayloadType.ProtoOaErrorRes)
             {
                 _logger.LogError("=== CTRADER ERROR RESPONSE (PayloadType={PayloadType}) ===", payloadType);
-                _logger.LogError("Raw payload hex: {Hex}", BitConverter.ToString(payload));
+                _logger.LogError("Raw payload hex: {Hex}", BitConverter.ToString(payload).Replace("-", " "));
                 Console.WriteLine($"=== CTRADER ERROR RESPONSE (PayloadType={payloadType}) ===");
-                Console.WriteLine($"Raw payload hex: {BitConverter.ToString(payload)}");
+                Console.WriteLine($"Raw payload hex: {BitConverter.ToString(payload).Replace("-", " ")}");
                 
                 try
                 {
-                    var errorMsg = ProtoOAErrorRes.Parser.ParseFrom(payload);
-                    _logger.LogError("ErrorCode: {ErrorCode}", errorMsg.ErrorCode);
-                    _logger.LogError("Description: {Description}", errorMsg.Description);
-                    _logger.LogError("AccountId: {AccountId}", errorMsg.CtidTraderAccountId);
-                    Console.WriteLine($"ErrorCode: {errorMsg.ErrorCode}");
-                    Console.WriteLine($"Description: {errorMsg.Description}");
-                    Console.WriteLine($"AccountId: {errorMsg.CtidTraderAccountId}");
+                    var (errorCode, description, accountId) = TryParseErrorRes(payload);
+                    _logger.LogError("ErrorCode: {ErrorCode}", errorCode);
+                    _logger.LogError("Description: {Description}", description);
+                    _logger.LogError("AccountId: {AccountId}", accountId);
+                    Console.WriteLine($"ErrorCode: {errorCode}");
+                    Console.WriteLine($"Description: {description}");
+                    Console.WriteLine($"AccountId: {accountId}");
                     Console.WriteLine($"================================");
                 }
                 catch (Exception ex)
@@ -485,17 +663,27 @@ public class CTraderClient : ICTraderClient, IDisposable
                 }
             }
 
-            // Check if someone is waiting for this response
-            if (_pendingResponses.TryGetValue(payloadType, out var tcs))
+            lock (_pendingResponsesLock)
             {
-                tcs.TrySetResult(payload);
+                if (!string.IsNullOrWhiteSpace(clientMsgId) &&
+                    _pendingResponsesByClientMsgId.TryGetValue((normalizedPayloadType, clientMsgId), out var correlatedTcs))
+                {
+                    correlatedTcs.TrySetResult(payload);
+                }
+
+                // Legacy fallback: check if someone is waiting by payload type only.
+                if (_pendingResponses.TryGetValue(normalizedPayloadType, out var tcs))
+                {
+                    tcs.TrySetResult(payload);
+                }
             }
 
             // Fire event for message received
             var message = new CTraderMessage
             {
-                PayloadType = payloadType,
+                PayloadType = normalizedPayloadType,
                 Payload = payload,
+                ClientMsgId = clientMsgId,
                 ReceivedAt = DateTime.UtcNow
             };
 
@@ -509,6 +697,40 @@ public class CTraderClient : ICTraderClient, IDisposable
         }
     }
 
+    private static (string? ErrorCode, string? Description, long? AccountId) TryParseErrorRes(byte[] payload)
+    {
+        // Observed wire format in this repo's logs:
+        // 0x12 => field 2 (string) errorCode (e.g., TRADING_BAD_VOLUME)
+        // 0x28 => field 5 (varint) ctidTraderAccountId
+        // 0x3A => field 7 (string) description
+        string? errorCode = null;
+        string? description = null;
+        long? accountId = null;
+
+        var input = new CodedInputStream(payload);
+        uint tag;
+        while ((tag = input.ReadTag()) != 0)
+        {
+            switch (tag)
+            {
+                case 0x12:
+                    errorCode = input.ReadString();
+                    break;
+                case 0x28:
+                    accountId = input.ReadInt64();
+                    break;
+                case 0x3A:
+                    description = input.ReadString();
+                    break;
+                default:
+                    input.SkipLastField();
+                    break;
+            }
+        }
+
+        return (errorCode, description, accountId);
+    }
+
     private async Task HeartbeatLoopAsync(CancellationToken cancellationToken)
     {
         try
@@ -520,7 +742,7 @@ public class CTraderClient : ICTraderClient, IDisposable
                 if (IsConnected)
                 {
                     var heartbeat = new ProtoHeartbeatEvent();
-                    await SendMessageAsync(heartbeat, (int)ProtoOAPayloadType.ProtoHeartbeatEvent, cancellationToken);
+                    await SendMessageAsync(heartbeat, 51, cancellationToken);  // 51 is HEARTBEAT_EVENT
                     _logger.LogDebug("Heartbeat sent");
                 }
             }

@@ -1,4 +1,5 @@
 using DerivCTrader.Infrastructure.CTrader.Models;
+using OpenAPI.Net;
 
 namespace DerivCTrader.Infrastructure.CTrader.Interfaces;
 
@@ -7,6 +8,11 @@ namespace DerivCTrader.Infrastructure.CTrader.Interfaces;
 /// </summary>
 public interface ICTraderClient
 {
+    /// <summary>
+    /// The configured cTrader Account ID (CTID Trader Account).
+    /// </summary>
+    long AccountId { get; }
+
     /// <summary>
     /// Indicates if the client is connected to cTrader
     /// </summary>
@@ -43,6 +49,11 @@ public interface ICTraderClient
     Task AuthenticateAccountAsync(long accountId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Perform reconcile to start receiving account/event stream.
+    /// </summary>
+    Task<bool> ReconcileAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Get list of accounts accessible with the current access token
     /// </summary>
     Task<List<ProtoOACtidTraderAccount>> GetAccountListAsync(CancellationToken cancellationToken = default);
@@ -53,9 +64,24 @@ public interface ICTraderClient
     Task SendMessageAsync<T>(T message, int payloadType, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Send a message to cTrader server and return the ClientMsgId used to correlate responses.
+    /// </summary>
+    Task<string> SendMessageWithClientMsgIdAsync<T>(T message, int payloadType, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Send a message to cTrader server (using enum)
+    /// </summary>
+    Task SendMessageAsync<T>(T message, DerivCTrader.Infrastructure.CTrader.Models.ProtoOAPayloadType payloadType, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Wait for a response message of specific type
     /// </summary>
     Task<T?> WaitForResponseAsync<T>(int payloadType, TimeSpan timeout, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Wait for a response message of specific type matching the provided ClientMsgId.
+    /// </summary>
+    Task<T?> WaitForResponseAsync<T>(int payloadType, string clientMsgId, TimeSpan timeout, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Event fired when connection state changes

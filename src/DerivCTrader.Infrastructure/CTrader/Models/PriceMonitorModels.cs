@@ -23,6 +23,11 @@ public class PendingOrderWatch
     public ParsedSignal Signal { get; set; } = null!;
 
     /// <summary>
+    /// Indicates whether this watch represents the opposite-direction execution for a provider.
+    /// </summary>
+    public bool IsOpposite { get; set; }
+
+    /// <summary>
     /// When this watch was created
     /// </summary>
     public DateTime CreatedAt { get; set; }
@@ -52,6 +57,11 @@ public class OrderCrossedEventArgs : EventArgs
     /// The trading signal
     /// </summary>
     public ParsedSignal Signal { get; set; } = null!;
+
+    /// <summary>
+    /// Indicates whether this execution should be treated as opposite-direction.
+    /// </summary>
+    public bool IsOpposite { get; set; }
 
     /// <summary>
     /// The price at which the order should execute

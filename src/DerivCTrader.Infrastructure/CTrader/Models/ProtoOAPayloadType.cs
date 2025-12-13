@@ -6,13 +6,21 @@ public enum ProtoOAPayloadType
     ProtoOaApplicationAuthRes = 2101,
     ProtoOaAccountAuthReq = 2102,
     ProtoOaAccountAuthRes = 2103,
+    ProtoOaSymbolsListReq = 2114,
+    ProtoOaSymbolsListRes = 2115,
     ProtoOaGetAccountListByAccessTokenReq = 2148,
     ProtoOaGetAccountListByAccessTokenRes = 2149,
-    ProtoOaErrorRes = 2142,
-    ProtoOaNewOrderReq = 2126,
-    ProtoOaNewOrderRes = 2127,
-    ProtoOaCancelOrderReq = 2128,
-    ProtoOaExecutionEvent = 2132,
+    // cTrader server sends error responses as PayloadType=2132 in our environment
+    ProtoOaErrorRes = 2132,
+    ProtoOaNewOrderReq = 2106, // CORRECTED from 2126 (which was ProtoOaExecutionEvent)
+    ProtoOaNewOrderRes = 2107,  // CORRECTED (previously was wrong sequence)
+    ProtoOaCancelOrderReq = 2108, // CORRECTED
+    ProtoOaExecutionEvent = 2126, // CORRECTED (was previously assigned to NewOrderReq)
+    // Market data subscriptions
+    ProtoOaSubscribeSpotsReq = 2120,
+    ProtoOaSubscribeSpotsRes = 2121,
+    ProtoOaUnsubscribeSpotsReq = 2122,
+    ProtoOaUnsubscribeSpotsRes = 2123,
     ProtoOaGetSymbolsReq = 2124,
     ProtoOaGetSymbolsRes = 2125,
     ProtoOaReconcileReq = 2134,

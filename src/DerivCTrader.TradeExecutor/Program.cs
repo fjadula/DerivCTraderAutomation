@@ -3,6 +3,7 @@ using DerivCTrader.Infrastructure.CTrader.Extensions;
 using DerivCTrader.Infrastructure.Persistence;
 using DerivCTrader.Infrastructure.Deriv;
 using DerivCTrader.Infrastructure.ExpiryCalculation;
+using DerivCTrader.Infrastructure.Notifications;
 using DerivCTrader.TradeExecutor.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -51,6 +52,26 @@ class Program
 
         var configuration = configBuilder.Build();
 
+        // One-off maintenance mode: mark a parsed signal as unprocessed and exit.
+        // Usage: dotnet run -- --reprocess-signal 41
+        var reprocessSignalId = TryGetIntArg(args, "--reprocess-signal");
+        if (reprocessSignalId.HasValue)
+        {
+            Console.WriteLine($"🔁 Reprocessing requested for SignalId={reprocessSignalId.Value}...");
+
+            var services = new ServiceCollection();
+            services.AddLogging();
+            services.AddSingleton<IConfiguration>(configuration);
+            services.AddSingleton<ITradeRepository, SqlServerTradeRepository>();
+
+            await using var provider = services.BuildServiceProvider();
+            var repo = provider.GetRequiredService<ITradeRepository>();
+            await repo.MarkSignalAsUnprocessedAsync(reprocessSignalId.Value);
+
+            Console.WriteLine($"✅ SignalId={reprocessSignalId.Value} marked as unprocessed. Start TradeExecutor normally to process it.");
+            return;
+        }
+
         // Configure Serilog
         Log.Logger = new LoggerConfiguration()
             .ReadFrom.Configuration(configuration)
@@ -80,6 +101,9 @@ class Program
 
                     // Database
                     services.AddSingleton<ITradeRepository, SqlServerTradeRepository>();
+
+                    // Telegram notifications (trade fill/close)
+                    services.AddSingleton<ITelegramNotifier, TelegramNotifier>();
 
                     // Deriv client - TRANSIENT so each service gets its own WebSocket connection
                     services.AddTransient<IDerivClient, DerivClient>();
@@ -136,5 +160,19 @@ class Program
         {
             Log.CloseAndFlush();
         }
+    }
+
+    private static int? TryGetIntArg(string[] args, string name)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase))
+            {
+                if (int.TryParse(args[i + 1], out var value))
+                    return value;
+            }
+        }
+
+        return null;
     }
 }

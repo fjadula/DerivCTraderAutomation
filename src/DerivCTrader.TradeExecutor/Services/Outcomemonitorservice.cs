@@ -35,7 +35,14 @@ public class OutcomeMonitorService : BackgroundService
         Console.WriteLine("=== OUTCOME MONITOR SERVICE STARTING ===");
 
         // Wait for Deriv client to connect
-        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -44,10 +51,21 @@ public class OutcomeMonitorService : BackgroundService
                 await CheckPendingTradesAsync(stoppingToken);
                 await Task.Delay(TimeSpan.FromSeconds(_checkIntervalSeconds), stoppingToken);
             }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error in outcome monitor loop");
-                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
             }
         }
 

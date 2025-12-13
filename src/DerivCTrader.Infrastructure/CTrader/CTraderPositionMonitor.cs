@@ -70,21 +70,26 @@ internal class CTraderPositionMonitor
 
     private Task HandleExecutionEventAsync(ProtoOAExecutionEvent executionEvent)
     {
-        _logger.LogInformation("Execution event received: OrderId={OrderId}, ExecutionType={ExecutionType}",
-            executionEvent.OrderId, executionEvent.ExecutionType);
+        _logger.LogInformation("Execution event received: ExecutionType={ExecutionType}",
+            executionEvent.ExecutionType);
 
-        if (executionEvent.ExecutionType == "ORDER_FILLED")
+        if (executionEvent.ExecutionType == ProtoOAExecutionType.OrderFilled)
         {
-            var eventArgs = new OrderExecutedEventArgs
+            // ProtoOAExecutionEvent has Order or Position nested objects
+            var order = executionEvent.Order;
+            if (order != null)
             {
-                OrderId = executionEvent.OrderId,
-                Symbol = executionEvent.SymbolId.ToString(),
-                Direction = executionEvent.TradeSide,
-                ExecutionPrice = executionEvent.ExecutionPrice,
-                ExecutionTime = DateTime.UtcNow
-            };
+                var eventArgs = new OrderExecutedEventArgs
+                {
+                    OrderId = order.OrderId.ToString(),
+                    Symbol = order.TradeData?.SymbolId.ToString() ?? "UNKNOWN",
+                    Direction = order.TradeData?.TradeSide.ToString() ?? "UNKNOWN",
+                    ExecutionPrice = (decimal)order.ExecutionPrice,
+                    ExecutionTime = DateTime.UtcNow
+                };
 
-            OrderExecuted?.Invoke(this, eventArgs);
+                OrderExecuted?.Invoke(this, eventArgs);
+            }
         }
 
         return Task.CompletedTask;

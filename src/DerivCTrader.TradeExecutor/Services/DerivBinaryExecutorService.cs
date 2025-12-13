@@ -18,7 +18,7 @@ namespace DerivCTrader.TradeExecutor.Services;
 ///    - Map direction (Buy → CALL, Sell → PUT)
 ///    - Execute binary option on Deriv
 ///    - Log success (KhulaFxTradeMonitor will detect and match)
-/// 3. Delete queue entry after successful Deriv execution
+/// 3. Update queue entry with DerivContractId (do NOT delete; KhulaFxTradeMonitor handles cleanup)
 /// 
 /// NOTE: This service does NOT write to BinaryOptionTrades - that's KhulaFxTradeMonitor's job.
 /// We only execute the binary and let KhulaFxTM detect it, match with queue, and update DB.
@@ -79,6 +79,10 @@ public class DerivBinaryExecutorService : BackgroundService
                 connected = true;
                 _logger.LogInformation("✅ Connected and authorized with Deriv");
             }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to connect to Deriv (attempt {Retry}/{Max})", retryCount, maxRetries);
@@ -87,7 +91,14 @@ public class DerivBinaryExecutorService : BackgroundService
                 {
                     var delaySeconds = retryCount * 5;
                     Console.WriteLine($"⏳ Retrying in {delaySeconds} seconds...");
-                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), stoppingToken);
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(delaySeconds), stoppingToken);
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
                 }
                 else
                 {
@@ -111,11 +122,22 @@ public class DerivBinaryExecutorService : BackgroundService
                 await ProcessTradeExecutionQueueAsync(stoppingToken);
                 await Task.Delay(TimeSpan.FromSeconds(_pollIntervalSeconds), stoppingToken);
             }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error in Deriv binary execution loop");
                 Console.WriteLine($"❌ ERROR: {ex.Message}");
-                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
             }
         }
 
@@ -193,10 +215,11 @@ public class DerivBinaryExecutorService : BackgroundService
         Console.WriteLine($"   💰 Purchase Price: ${result.PurchasePrice}");
         Console.WriteLine($"   🎁 Potential Payout: ${result.Payout}");
 
-        // Delete queue entry (KhulaFxTradeMonitor will detect and match)
-        await _repository.DeleteQueueItemAsync(queueEntry.QueueId);
-        _logger.LogInformation("🗑️ Deleted queue entry #{QueueId} - waiting for KhulaFxTM to detect and match", queueEntry.QueueId);
-        Console.WriteLine($"   🗑️ Queue entry deleted");
+        // IMPORTANT: Do NOT delete from TradeExecutionQueue.
+        // KhulaFxTradeMonitor depends on the row existing to match FIFO by (Asset, Direction).
+        await _repository.UpdateTradeExecutionQueueDerivContractAsync(queueEntry.QueueId, result.ContractId ?? string.Empty);
+        _logger.LogInformation("🧾 Updated queue entry #{QueueId} with DerivContractId={ContractId} (left in queue for KhulaFxTM)", queueEntry.QueueId, result.ContractId);
+        Console.WriteLine($"   🧾 Queue entry updated (not deleted)");
         Console.WriteLine($"   ⏳ Waiting for KhulaFxTradeMonitor to detect and match...");
         Console.WriteLine();
     }

@@ -1,4 +1,5 @@
 using System.Data;
+using System.Text.RegularExpressions;
 using Dapper;
 using DerivCTrader.Application.Interfaces;
 using DerivCTrader.Domain.Entities;
@@ -10,8 +11,19 @@ namespace DerivCTrader.Infrastructure.Persistence;
 
 public class SqlServerTradeRepository : ITradeRepository
 {
+    public async Task<bool> IsSignalProcessedAsync(int signalId)
+    {
+        const string sql = @"SELECT Processed FROM ParsedSignalsQueue WHERE SignalId = @SignalId";
+        using var connection = CreateConnection();
+        var processed = await connection.QueryFirstOrDefaultAsync<bool?>(sql, new { SignalId = signalId });
+        return processed.HasValue && processed.Value;
+    }
+
     private readonly string _connectionString;
     private readonly ILogger<SqlServerTradeRepository> _logger;
+
+    private readonly object _forexTradeIdInitLock = new();
+    private bool? _forexTradeIdIsIdentity;
 
     public SqlServerTradeRepository(IConfiguration configuration, ILogger<SqlServerTradeRepository> logger)
     {
@@ -145,17 +157,58 @@ public class SqlServerTradeRepository : ITradeRepository
 
     public async Task<int> CreateForexTradeAsync(ForexTrade trade)
     {
-        const string sql = @"
-            INSERT INTO ForexTrades (Symbol, Direction, EntryPrice, ExitPrice, EntryTime, ExitTime, 
-                                    PnL, PnLPercent, Status, Notes, CreatedAt, IndicatorsLinked)
-            VALUES (@Symbol, @Direction, @EntryPrice, @ExitPrice, @EntryTime, @ExitTime, 
-                   @PnL, @PnLPercent, @Status, @Notes, @CreatedAt, @IndicatorsLinked);
-            SELECT CAST(SCOPE_IDENTITY() as int);";
-
         using var connection = CreateConnection();
-        var tradeId = await connection.ExecuteScalarAsync<int>(sql, trade);
-        _logger.LogInformation("Created Forex trade {TradeId} for {Symbol}", tradeId, trade.Symbol);
-        return tradeId;
+        connection.Open();
+
+        // Some DBs have TradeId as IDENTITY, others have it as NOT NULL without identity.
+        // Detect once and adapt.
+        if (!_forexTradeIdIsIdentity.HasValue)
+        {
+            var isIdentity = await connection.ExecuteScalarAsync<int>(
+                "SELECT CAST(COLUMNPROPERTY(OBJECT_ID('dbo.ForexTrades'), 'TradeId', 'IsIdentity') AS int);");
+
+            lock (_forexTradeIdInitLock)
+            {
+                _forexTradeIdIsIdentity ??= isIdentity == 1;
+            }
+        }
+
+        if (_forexTradeIdIsIdentity == true)
+        {
+            const string identitySql = @"
+                INSERT INTO ForexTrades (Symbol, Direction, EntryPrice, ExitPrice, EntryTime, ExitTime, 
+                                        PnL, PnLPercent, Status, Notes, CreatedAt, IndicatorsLinked)
+                OUTPUT INSERTED.TradeId
+                VALUES (@Symbol, @Direction, @EntryPrice, @ExitPrice, @EntryTime, @ExitTime, 
+                       @PnL, @PnLPercent, @Status, @Notes, @CreatedAt, @IndicatorsLinked);";
+
+            var tradeId = await connection.ExecuteScalarAsync<int>(identitySql, trade);
+            _logger.LogInformation("Created Forex trade {TradeId} for {Symbol}", tradeId, trade.Symbol);
+            return tradeId;
+        }
+        else
+        {
+            using var tx = connection.BeginTransaction();
+
+            const string nextIdSql = @"
+                SELECT ISNULL(MAX(TradeId), 0) + 1
+                FROM ForexTrades WITH (UPDLOCK, HOLDLOCK);";
+
+            var nextId = await connection.ExecuteScalarAsync<int>(nextIdSql, transaction: tx);
+            trade.TradeId = nextId;
+
+            const string insertSql = @"
+                INSERT INTO ForexTrades (TradeId, Symbol, Direction, EntryPrice, ExitPrice, EntryTime, ExitTime, 
+                                        PnL, PnLPercent, Status, Notes, CreatedAt, IndicatorsLinked)
+                VALUES (@TradeId, @Symbol, @Direction, @EntryPrice, @ExitPrice, @EntryTime, @ExitTime, 
+                       @PnL, @PnLPercent, @Status, @Notes, @CreatedAt, @IndicatorsLinked);";
+
+            await connection.ExecuteAsync(insertSql, trade, transaction: tx);
+            tx.Commit();
+
+            _logger.LogInformation("Created Forex trade {TradeId} for {Symbol}", nextId, trade.Symbol);
+            return nextId;
+        }
     }
 
     public async Task UpdateForexTradeAsync(ForexTrade trade)
@@ -178,6 +231,20 @@ public class SqlServerTradeRepository : ITradeRepository
         const string sql = "SELECT * FROM ForexTrades WHERE TradeId = @TradeId";
         using var connection = CreateConnection();
         return await connection.QueryFirstOrDefaultAsync<ForexTrade>(sql, new { TradeId = tradeId });
+    }
+
+    public async Task<ForexTrade?> FindLatestForexTradeByCTraderPositionIdAsync(long positionId)
+    {
+        // Notes contains a marker like: "CTraderPositionId=123456".
+        const string sql = @"
+            SELECT TOP 1 *
+            FROM ForexTrades
+            WHERE Notes LIKE '%' + @Needle + '%'
+            ORDER BY TradeId DESC";
+
+        using var connection = CreateConnection();
+        var needle = $"CTraderPositionId={positionId}";
+        return await connection.QueryFirstOrDefaultAsync<ForexTrade>(sql, new { Needle = needle });
     }
 
     public async Task<int> CreateBinaryTradeAsync(BinaryOptionTrade trade)
@@ -279,6 +346,18 @@ public class SqlServerTradeRepository : ITradeRepository
         _logger.LogInformation("Deleted queue item {QueueId}", queueId);
     }
 
+    public async Task UpdateTradeExecutionQueueDerivContractAsync(int queueId, string derivContractId)
+    {
+        const string sql = @"
+            UPDATE TradeExecutionQueue
+            SET DerivContractId = @DerivContractId
+            WHERE QueueId = @QueueId";
+
+        using var connection = CreateConnection();
+        await connection.ExecuteAsync(sql, new { QueueId = queueId, DerivContractId = derivContractId });
+        _logger.LogInformation("Updated queue item {QueueId} with DerivContractId={DerivContractId}", queueId, derivContractId);
+    }
+
     // ===== PARSED SIGNALS OPERATIONS =====
 
     public async Task<int> SaveParsedSignalAsync(ParsedSignal signal)
@@ -292,10 +371,24 @@ public class SqlServerTradeRepository : ITradeRepository
                     @Processed, @Timeframe, @Pattern, @RawMessage);
             SELECT CAST(SCOPE_IDENTITY() as int);";
 
+        const string findExistingSql = @"
+            SELECT TOP 1 SignalId
+            FROM ParsedSignalsQueue
+            WHERE Asset = @Asset
+              AND Direction = @Direction
+              AND ProviderChannelId = @ProviderChannelId
+              AND ((EntryPrice = @EntryPrice) OR (EntryPrice IS NULL AND @EntryPrice IS NULL))
+              AND ((StopLoss = @StopLoss) OR (StopLoss IS NULL AND @StopLoss IS NULL))
+              AND ((TakeProfit = @TakeProfit) OR (TakeProfit IS NULL AND @TakeProfit IS NULL))
+            ORDER BY SignalId DESC;";
+
         using var connection = CreateConnection();
-        var signalId = await connection.ExecuteScalarAsync<int>(sql, new
+
+        var storageAsset = NormalizeAssetForStorage(signal.Asset);
+
+        var parameters = new
         {
-            signal.Asset,
+            Asset = storageAsset,
             Direction = signal.Direction.ToString(),
             signal.EntryPrice,
             signal.StopLoss,
@@ -308,10 +401,69 @@ public class SqlServerTradeRepository : ITradeRepository
             signal.Timeframe,
             signal.Pattern,
             signal.RawMessage
-        });
+        };
+
+        int signalId;
+        try
+        {
+            signalId = await connection.ExecuteScalarAsync<int>(sql, parameters);
+        }
+        catch (SqlException ex) when (ex.Number is 2601 or 2627)
+        {
+            var existingSignalId = await connection.QueryFirstOrDefaultAsync<int?>(findExistingSql, new
+            {
+                Asset = storageAsset,
+                Direction = signal.Direction.ToString(),
+                signal.EntryPrice,
+                signal.StopLoss,
+                signal.TakeProfit,
+                signal.ProviderChannelId
+            });
+
+            if (existingSignalId.HasValue)
+            {
+                _logger.LogInformation(
+                    "Duplicate parsed signal ignored (existing SignalId={SignalId}, Asset={Asset}, Direction={Direction}, ProviderChannelId={ProviderChannelId})",
+                    existingSignalId.Value, storageAsset, signal.Direction, signal.ProviderChannelId);
+                return existingSignalId.Value;
+            }
+
+            _logger.LogWarning(
+                ex,
+                "Duplicate parsed signal insert detected but existing row not found (Asset={Asset}, Direction={Direction}, ProviderChannelId={ProviderChannelId})",
+                storageAsset, signal.Direction, signal.ProviderChannelId);
+            throw;
+        }
         
-        _logger.LogInformation("Saved parsed signal: SignalId={SignalId}, Asset={Asset}", signalId, signal.Asset);
+        _logger.LogInformation("Saved parsed signal: SignalId={SignalId}, Asset={Asset}", signalId, storageAsset);
         return signalId;
+    }
+
+    private string NormalizeAssetForStorage(string? asset)
+    {
+        // ParsedSignalsQueue.Asset is NVARCHAR(20). Keep entries insertable while staying compatible with symbol matching.
+        var cleaned = (asset ?? string.Empty).Trim();
+        if (cleaned.Length <= 20)
+            return cleaned;
+
+        // Prefer removing common suffixes rather than blunt truncation
+        cleaned = Regex.Replace(cleaned, @"\bINDEX\b", "", RegexOptions.IgnoreCase).Trim();
+        cleaned = Regex.Replace(cleaned, @"\(\s*1s\s*\)", " 1s", RegexOptions.IgnoreCase).Trim();
+        cleaned = Regex.Replace(cleaned, @"\s+", " ").Trim();
+        if (cleaned.Length <= 20)
+            return cleaned;
+
+        cleaned = Regex.Replace(cleaned, @"\bVOLATILITY\b", "Vol", RegexOptions.IgnoreCase).Trim();
+        cleaned = Regex.Replace(cleaned, @"\s+", " ").Trim();
+        if (cleaned.Length <= 20)
+            return cleaned;
+
+        var noSpaces = cleaned.Replace(" ", "");
+        if (noSpaces.Length <= 20)
+            return noSpaces;
+
+        _logger.LogWarning("Asset too long for ParsedSignalsQueue (len={Len}). Truncating: {Asset}", noSpaces.Length, noSpaces);
+        return noSpaces.Substring(0, 20);
     }
 
     public async Task<List<ParsedSignal>> GetUnprocessedSignalsAsync()
@@ -338,12 +490,25 @@ public class SqlServerTradeRepository : ITradeRepository
         _logger.LogInformation("Marked signal as processed: SignalId={SignalId}", signalId);
     }
 
+    public async Task MarkSignalAsUnprocessedAsync(int signalId)
+    {
+        const string sql = @"
+            UPDATE ParsedSignalsQueue
+            SET Processed = 0, ProcessedAt = NULL
+            WHERE SignalId = @SignalId";
+
+        using var connection = CreateConnection();
+        await connection.ExecuteAsync(sql, new { SignalId = signalId });
+        _logger.LogInformation("Marked signal as UNprocessed: SignalId={SignalId}", signalId);
+    }
+
     // ===== DERIV TRADE QUEUE OPERATIONS =====
 
     public async Task<List<TradeExecutionQueue>> GetPendingDerivTradesAsync()
     {
         const string sql = @"
             SELECT * FROM TradeExecutionQueue 
+            WHERE (DerivContractId IS NULL OR LTRIM(RTRIM(DerivContractId)) = '')
             ORDER BY CreatedAt ASC";
 
         using var connection = CreateConnection();
@@ -369,6 +534,7 @@ public class SqlServerTradeRepository : ITradeRepository
             SettledAt = DateTime.UtcNow 
         });
         
+
         _logger.LogInformation("Updated Deriv trade outcome: QueueId={QueueId}, Outcome={Outcome}, Profit={Profit}", 
             queueId, outcome, profit);
     }

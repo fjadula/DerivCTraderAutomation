@@ -15,6 +15,8 @@ public class ParsedSignal
     public decimal? TakeProfit4 { get; set; }
     public decimal? RiskRewardRatio { get; set; }
     public decimal? LotSize { get; set; }
+    public double RiskUsd { get; set; }  // Risk amount in USD for synthetic indices
+    public double StopLossTicks { get; set; }  // Stop loss in ticks for synthetic indices
     public string ProviderChannelId { get; set; } = string.Empty;
     public string ProviderName { get; set; } = string.Empty;
     public SignalType SignalType { get; set; }

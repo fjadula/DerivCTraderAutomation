@@ -41,11 +41,11 @@ public class BinaryExpiryCalculator : IBinaryExpiryCalculator
     /// </summary>
     public int CalculateExpiryMinutes(string asset, string? timeframe = null, string? pattern = null)
     {
-        // 1. Volatility indices always use 15 minutes (fast-moving)
+        // 1. Volatility indices use a minimum of 30 minutes (per current strategy requirements)
         if (IsVolatilityIndex(asset))
         {
-            _logger.LogInformation("Asset {Asset} is volatility index - using 15 min expiry", asset);
-            return 15;
+            _logger.LogInformation("Asset {Asset} is volatility index - using 30 min expiry", asset);
+            return 30;
         }
 
         // 2. Parse timeframe to get base minutes
@@ -65,7 +65,7 @@ public class BinaryExpiryCalculator : IBinaryExpiryCalculator
         }
 
         // 4. Apply absolute bounds
-        const int MinimumExpiry = 21;   // Never less than 21 minutes
+        const int MinimumExpiry = 30;   // Never less than 30 minutes
         const int MaximumExpiry = 1440; // Never more than 24 hours (1 day)
 
         baseMinutes = Math.Max(baseMinutes, MinimumExpiry);
