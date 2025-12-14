@@ -612,7 +612,34 @@ public class CTraderClient : ICTraderClient, IDisposable
                 }
             }
 
+            // cTrader Open API sends spot events as payload type 2121 (same as SubscribeSpotsRes).
+            // Differentiate by checking if it parses as a ProtoOASpotEvent (has SymbolId + Bid/Ask).
+            if (payloadType == 2121)
+            {
+                try
+                {
+                    var spotEvent = ProtoOASpotEvent.Parser.ParseFrom(payload);
+                    // If it has a SymbolId and at least one of Bid/Ask, treat it as a spot event
+                    if (spotEvent.SymbolId > 0 && (spotEvent.HasBid || spotEvent.HasAsk))
+                    {
+                        _logger.LogDebug("[SPOT-DETECT] Detected spot event on PayloadType=2121: SymbolId={SymbolId}, Bid={Bid}, Ask={Ask}",
+                            spotEvent.SymbolId, spotEvent.HasBid ? spotEvent.Bid : 0, spotEvent.HasAsk ? spotEvent.Ask : 0);
+                        normalizedPayloadType = (int)PayloadType.ProtoOaSpotEvent;
+                    }
+                }
+                catch
+                {
+                    // Not a SpotEvent; keep as SubscribeSpotsRes.
+                }
+            }
+
             _logger.LogInformation("📨 Received message: PayloadType={PayloadType}, Size={Size}", payloadType, length);
+
+            // DEBUG: Log ALL payload types to help diagnose spot event issues
+            if (payloadType != 51) // Skip heartbeats
+            {
+                _logger.LogDebug("[ALL-MSG] PayloadType={PayloadType}, Size={Size}, ClientMsgId={ClientMsgId}", payloadType, length, clientMsgId);
+            }
 
             // In our environment, cTrader returns order failures as PayloadType=2132.
             // Log and attempt to parse as ErrorRes so the real rejection reason is visible.

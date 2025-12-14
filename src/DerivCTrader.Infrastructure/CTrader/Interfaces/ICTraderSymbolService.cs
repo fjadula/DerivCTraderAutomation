@@ -56,6 +56,11 @@ public interface ICTraderSymbolService
     bool TryGetSymbolDigits(long symbolId, out int digits);
 
     /// <summary>
+    /// Get the number of digits for a symbol, or throw if unknown.
+    /// </summary>
+    int GetDigits(long symbolId);
+
+    /// <summary>
     /// Try to resolve volume constraints for a symbol (wire units as expected by cTrader Open API).
     /// </summary>
     bool TryGetSymbolVolumeConstraints(long symbolId, out long minVolume, out long maxVolume, out long stepVolume);

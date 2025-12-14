@@ -182,12 +182,16 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
                 }
                 else
                 {
-                    // CRITICAL: If we can't get market price, we cannot verify the order won't fill immediately
-                    // Skip the order to prevent accidental market fills
+                    // Cannot get market price - this commonly happens for synthetic indices on Deriv cTrader
+                    // where spot subscription doesn't stream price ticks.
+                    // Instead of skipping the order, we proceed with the pending order.
+                    // The broker will handle it appropriately:
+                    //   - If the entry price is favorable (not marketable), it stays as pending
+                    //   - If the entry price is at/beyond market, it may fill immediately as market
                     _logger.LogWarning(
-                        "[CTraderPendingOrderService] Cannot verify order marketability - bid/ask unavailable. Skipping order: Asset={Asset}, Direction={Direction}, EntryPrice={EntryPrice}",
-                        signal.Asset, effectiveDirection, signal.EntryPrice);
-                    return new CTraderOrderResult { Success = false, ErrorMessage = "Cannot place pending order: market price unavailable for marketability check" };
+                        "[CTraderPendingOrderService] Bid/Ask unavailable - proceeding with order anyway. Asset={Asset}, Direction={Direction}, EntryPrice={EntryPrice}, OrderType={OrderType}",
+                        signal.Asset, effectiveDirection, signal.EntryPrice, resolvedOrderType);
+                    // Skip marketability check - let the broker handle it
                 }
 
                 if (isMarketable)

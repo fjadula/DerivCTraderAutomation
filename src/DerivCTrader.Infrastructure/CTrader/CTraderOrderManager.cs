@@ -38,7 +38,7 @@ public class CTraderOrderManager : ICTraderOrderManager
         _client = client;
         _symbolService = symbolService;
         _configuration = configuration;
-        
+
         // 🔧 FIX: Use InvariantCulture for decimal parsing
         var lotSizeString = configuration.GetSection("CTrader")["DefaultLotSize"] ?? "0.2";
         _defaultLotSize = double.Parse(lotSizeString, CultureInfo.InvariantCulture);
@@ -139,7 +139,7 @@ public class CTraderOrderManager : ICTraderOrderManager
                 _defaultLotSize,
                 orderReq.Volume,
                 finalVolume);
-            
+
             // LIMIT/STOP orders require entry price
             if (orderType != CTraderOrderType.Market)
             {
@@ -267,27 +267,20 @@ public class CTraderOrderManager : ICTraderOrderManager
                 }
 
                 // Safety: ensure the execution event's symbol matches the signal asset.
-                var expectedAsset = (signal.Asset ?? string.Empty).Replace("/", string.Empty).Replace(" ", string.Empty).ToUpperInvariant();
+                // Use symbolId comparison since we already resolved the symbol during order creation.
                 if (TryExtractSymbolId(response, out var executedSymbolId))
                 {
-                    if (_symbolService.TryGetSymbolName(executedSymbolId, out var executedSymbolName))
+                    if (executedSymbolId != symbolId)
                     {
-                        var executedAsset = executedSymbolName.Replace("/", string.Empty).Replace(" ", string.Empty).ToUpperInvariant();
-                        if (!string.Equals(expectedAsset, executedAsset, StringComparison.Ordinal))
+                        var mismatch = $"Executed SymbolId mismatch: expected {symbolId} but got {executedSymbolId} (OrderId={orderId})";
+                        _logger.LogCritical("❌ {Message}", mismatch);
+                        return new CTraderOrderResult
                         {
-                            var mismatch = $"Executed symbol mismatch: expected {expectedAsset} but got {executedSymbolName} (SymbolId={executedSymbolId}, OrderId={orderId})";
-                            _logger.LogCritical("❌ {Message}", mismatch);
-                            return new CTraderOrderResult
-                            {
-                                Success = false,
-                                ErrorMessage = mismatch
-                            };
-                        }
+                            Success = false,
+                            ErrorMessage = mismatch
+                        };
                     }
-                    else
-                    {
-                        _logger.LogWarning("Could not resolve executed SymbolId={SymbolId} to a symbol name for sanity check", executedSymbolId);
-                    }
+                    _logger.LogDebug("Symbol verification passed: SymbolId={SymbolId}, Asset={Asset}", executedSymbolId, signal.Asset);
                 }
                 else
                 {
@@ -398,23 +391,20 @@ public class CTraderOrderManager : ICTraderOrderManager
                 {
                     var orderId = response.Order.OrderId;
 
-                // Extract PositionId (required for post-execution SL/TP modifications).
-                long? positionId = null;
-                if (TryExtractPositionId(response, out var extractedPositionId))
-                {
-                    positionId = extractedPositionId;
-                }
-
-                // Safety: ensure the execution event's symbol matches the signal asset.
-                var expectedAsset = (signal.Asset ?? string.Empty).Replace("/", string.Empty).Replace(" ", string.Empty).ToUpperInvariant();
-                if (TryExtractSymbolId(response, out var executedSymbolId))
-                {
-                    if (_symbolService.TryGetSymbolName(executedSymbolId, out var executedSymbolName))
+                    // Extract PositionId (required for post-execution SL/TP modifications).
+                    long? positionId = null;
+                    if (TryExtractPositionId(response, out var extractedPositionId))
                     {
-                        var executedAsset = executedSymbolName.Replace("/", string.Empty).Replace(" ", string.Empty).ToUpperInvariant();
-                        if (!string.Equals(expectedAsset, executedAsset, StringComparison.Ordinal))
+                        positionId = extractedPositionId;
+                    }
+
+                    // Safety: ensure the execution event's symbol matches the signal asset.
+                    // Use symbolId comparison since we already resolved the symbol during order creation.
+                    if (TryExtractSymbolId(response, out var executedSymbolId))
+                    {
+                        if (executedSymbolId != symbolId)
                         {
-                            var mismatch = $"Executed symbol mismatch: expected {expectedAsset} but got {executedSymbolName} (SymbolId={executedSymbolId}, OrderId={orderId})";
+                            var mismatch = $"Executed SymbolId mismatch: expected {symbolId} but got {executedSymbolId} (OrderId={orderId})";
                             _logger.LogCritical("❌ {Message}", mismatch);
                             return new CTraderOrderResult
                             {
@@ -422,72 +412,68 @@ public class CTraderOrderManager : ICTraderOrderManager
                                 ErrorMessage = mismatch
                             };
                         }
+                        _logger.LogDebug("Symbol verification passed: SymbolId={SymbolId}, Asset={Asset}", executedSymbolId, signal.Asset);
                     }
                     else
                     {
-                        _logger.LogWarning("Could not resolve executed SymbolId={SymbolId} to a symbol name for sanity check", executedSymbolId);
+                        _logger.LogWarning("Could not extract SymbolId from execution event for sanity check (OrderId={OrderId})", orderId);
                     }
-                }
-                else
-                {
-                    _logger.LogWarning("Could not extract SymbolId from execution event for sanity check (OrderId={OrderId})", orderId);
-                }
 
-                _logger.LogInformation("✅ Market order executed: OrderId={OrderId}, ExecutionPrice={Price}",
-                    orderId, response.Order.ExecutionPrice);
+                    _logger.LogInformation("✅ Market order executed: OrderId={OrderId}, ExecutionPrice={Price}",
+                        orderId, response.Order.ExecutionPrice);
 
-                // Apply SL/TP immediately after execution for MARKET orders (cTrader rejects absolute SL/TP on initial MARKET request).
-                var stopLoss = signal.StopLoss.HasValue ? (double?)signal.StopLoss.Value : null;
-                var takeProfit = (double?)null;
-                if (signal.TakeProfit.HasValue)
-                    takeProfit = (double)signal.TakeProfit.Value;
-                else if (signal.TakeProfit2.HasValue)
-                    takeProfit = (double)signal.TakeProfit2.Value;
-                else if (signal.TakeProfit3.HasValue)
-                    takeProfit = (double)signal.TakeProfit3.Value;
-                else if (signal.TakeProfit4.HasValue)
-                    takeProfit = (double)signal.TakeProfit4.Value;
+                    // Apply SL/TP immediately after execution for MARKET orders (cTrader rejects absolute SL/TP on initial MARKET request).
+                    var stopLoss = signal.StopLoss.HasValue ? (double?)signal.StopLoss.Value : null;
+                    var takeProfit = (double?)null;
+                    if (signal.TakeProfit.HasValue)
+                        takeProfit = (double)signal.TakeProfit.Value;
+                    else if (signal.TakeProfit2.HasValue)
+                        takeProfit = (double)signal.TakeProfit2.Value;
+                    else if (signal.TakeProfit3.HasValue)
+                        takeProfit = (double)signal.TakeProfit3.Value;
+                    else if (signal.TakeProfit4.HasValue)
+                        takeProfit = (double)signal.TakeProfit4.Value;
 
-                var sltpRequested = stopLoss.HasValue || takeProfit.HasValue;
-                bool? sltpApplied = null;
+                    var sltpRequested = stopLoss.HasValue || takeProfit.HasValue;
+                    bool? sltpApplied = null;
 
-                if (sltpRequested && positionId.HasValue && positionId.Value > 0)
-                {
-                    _logger.LogInformation(
-                        "📝 Applying SL/TP to market order position: PositionId={PositionId}, SL={SL}, TP={TP}",
-                        positionId.Value,
-                        stopLoss,
-                        takeProfit);
-
-                    var amended = await ModifyPositionAsync(positionId.Value, stopLoss, takeProfit);
-                    sltpApplied = amended;
-
-                    if (amended)
+                    if (sltpRequested && positionId.HasValue && positionId.Value > 0)
                     {
                         _logger.LogInformation(
-                            "✅ SL/TP applied to market order: PositionId={PositionId}, SL={SL}, TP={TP}",
+                            "📝 Applying SL/TP to market order position: PositionId={PositionId}, SL={SL}, TP={TP}",
                             positionId.Value,
                             stopLoss,
                             takeProfit);
+
+                        var amended = await ModifyPositionAsync(positionId.Value, stopLoss, takeProfit);
+                        sltpApplied = amended;
+
+                        if (amended)
+                        {
+                            _logger.LogInformation(
+                                "✅ SL/TP applied to market order: PositionId={PositionId}, SL={SL}, TP={TP}",
+                                positionId.Value,
+                                stopLoss,
+                                takeProfit);
+                        }
+                        else
+                        {
+                            _logger.LogWarning(
+                                "⚠️ Market order executed but failed to amend SL/TP: PositionId={PositionId}, SL={SL}, TP={TP}",
+                                positionId.Value,
+                                stopLoss,
+                                takeProfit);
+                        }
                     }
-                    else
+                    else if (sltpRequested)
                     {
+                        sltpApplied = false;
                         _logger.LogWarning(
-                            "⚠️ Market order executed but failed to amend SL/TP: PositionId={PositionId}, SL={SL}, TP={TP}",
-                            positionId.Value,
+                            "⚠️ Market order executed but PositionId unavailable; cannot apply SL/TP: OrderId={OrderId}, SL={SL}, TP={TP}",
+                            orderId,
                             stopLoss,
                             takeProfit);
                     }
-                }
-                else if (sltpRequested)
-                {
-                    sltpApplied = false;
-                    _logger.LogWarning(
-                        "⚠️ Market order executed but PositionId unavailable; cannot apply SL/TP: OrderId={OrderId}, SL={SL}, TP={TP}",
-                        orderId,
-                        stopLoss,
-                        takeProfit);
-                }
 
                     return new CTraderOrderResult
                     {
@@ -998,10 +984,9 @@ public class CTraderOrderManager : ICTraderOrderManager
                     var tickSymbolId = symbolIdObj is null ? 0L : Convert.ToInt64(symbolIdObj);
 
                     spotEventsReceived++;
-
                     if (tickSymbolId != symbolId)
                     {
-                        // Only log first few mismatches to avoid spam
+                        // Frequent log, keep debug unless critical
                         if (spotEventsReceived <= 3)
                             _logger.LogDebug("[BID/ASK] Spot event for different symbol: received={ReceivedId}, expected={ExpectedId}", tickSymbolId, symbolId);
                         return;
@@ -1013,36 +998,37 @@ public class CTraderOrderManager : ICTraderOrderManager
                     var bid = NormalizePrice(symbolId, bidObj);
                     var ask = NormalizePrice(symbolId, askObj);
 
-                    double? bidResult = bid > 0 ? bid : null;
-                    double? askResult = ask > 0 ? ask : null;
+                    if (bid > 0 || ask > 0)
+                    {
+                        var bidVal = bid > 0 ? (double?)bid : null;
+                        var askVal = ask > 0 ? (double?)ask : null;
 
-                    _logger.LogDebug("[BID/ASK] Got spot event for {Symbol} (SymbolId={SymbolId}): Bid={Bid}, Ask={Ask}", symbol, symbolId, bidResult, askResult);
-
-                    if (bidResult.HasValue || askResult.HasValue)
-                        tcs.TrySetResult((bidResult, askResult));
+                        _logger.LogDebug("[BID/ASK] Received {Symbol}: Bid={Bid}, Ask={Ask}", symbol, bidVal, askVal);
+                        tcs.TrySetResult((bidVal, askVal));
+                    }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogDebug(ex, "[BID/ASK] Error parsing spot event");
+                    _logger.LogError(ex, "[BID/ASK] Error processing spot event for {Symbol} (SymbolId={SymbolId})", symbol, symbolId);
                 }
             }
 
             _client.MessageReceived += Handler;
+
             try
             {
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                using var reg = cts.Token.Register(() => tcs.TrySetCanceled(cts.Token));
-                return await tcs.Task;
-            }
-            catch (OperationCanceledException)
-            {
-                _logger.LogWarning("[BID/ASK] Timeout waiting for spot event. Symbol={Symbol}, SymbolId={SymbolId}, SpotEventsReceived={Count}", symbol, symbolId, spotEventsReceived);
-                return (null, null);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "[BID/ASK] Error waiting for spot event. Symbol={Symbol}", symbol);
-                return (null, null);
+                using var reg = cts.Token.Register(() =>
+                {
+                    if (!tcs.Task.IsCompleted)
+                    {
+                        _logger.LogWarning("[BID/ASK] Timeout waiting for spot event. Symbol={Symbol}, SymbolId={SymbolId}, SpotEventsReceived={Count}", symbol, symbolId, spotEventsReceived);
+                        tcs.TrySetResult((null, null));
+                    }
+                });
+
+                var result = await tcs.Task;
+                return result;
             }
             finally
             {
@@ -1238,7 +1224,7 @@ public class CTraderOrderManager : ICTraderOrderManager
             _logger.LogInformation("[SYNTHETIC] Calculated risk-based volume: {Volume} (lots={Lots}, riskUsd={RiskUsd}, stopLossTicks={StopLossTicks}, tickValue={TickValue}, contractSize={ContractSize}, marginInitial={MarginInitial})", volume, lots, riskUsd, stopLossTicks, tickValue, contractSize, marginInitial);
             return volume;
         }
-fallback:
+    fallback:
         // Default: use configured lot size (forex/other)
         // cTrader wire units: lots * 100000 (no extra *100)
         var requested = (long)Math.Round(_defaultLotSize * 100_000d, MidpointRounding.AwayFromZero);
