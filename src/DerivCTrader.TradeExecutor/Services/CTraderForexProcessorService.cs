@@ -257,15 +257,15 @@ public class CTraderForexProcessorService : BackgroundService
         // Create opposite direction order
         if (providerConfig.TakeOpposite)
         {
-            var oppositeDirection = signalForOrder.Direction == TradeDirection.Buy 
-                ? TradeDirection.Sell 
+            var oppositeDirection = signalForOrder.Direction == TradeDirection.Buy
+                ? TradeDirection.Sell
                 : TradeDirection.Buy;
             _logger.LogInformation("📝 Creating OPPOSITE direction order: {Direction}", oppositeDirection);
             Console.WriteLine($"   📝 Creating OPPOSITE order ({oppositeDirection})...");
             var oppositeSignal = TryRecalculateStopsForOpposite(signalForOrder, oppositeDirection);
-            // Ensure the opposite signal's Direction reflects the opposite leg so downstream consumers
-            // that inspect the signal directly (for logging or SL/TP recalculation) see the correct direction.
-            oppositeSignal.Direction = oppositeDirection;
+            // NOTE: Do NOT set oppositeSignal.Direction here!
+            // The isOpposite=true flag tells ProcessSignalAsync to flip the direction via GetEffectiveDirection.
+            // Setting it here would cause a double-flip (Buy -> Sell -> Buy).
             oppositeOrderResult = await _pendingOrderService.ProcessSignalAsync(oppositeSignal, isOpposite: true);
             if (oppositeOrderResult.Success)
             {
