@@ -905,17 +905,18 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
 
         if (!current.HasValue || current.Value <= 0)
         {
-            // Fallback: treat the requested EntryPrice as the current spot price so the order
-            // type is determined consistently with user's intent (i.e., BUY with Entry => LIMIT).
-            current = (double)signal.EntryPrice.Value;
-            _logger.LogInformation(
-                "InferPendingOrderType: spot price unavailable; using EntryPrice as spot fallback. Asset={Asset} Dir={Dir} Entry={Entry} Bid={Bid} Ask={Ask} IsOpposite={IsOpposite}",
+            // Spot price unavailable (common for synthetic indices on Deriv cTrader).
+            // Default to STOP order so the order waits for price to reach entry level,
+            // rather than LIMIT which could fill immediately at a "better" price.
+            _logger.LogWarning(
+                "InferPendingOrderType: spot price unavailable; defaulting to STOP order. Asset={Asset} Dir={Dir} Entry={Entry} Bid={Bid} Ask={Ask} IsOpposite={IsOpposite}",
                 signal.Asset,
                 effectiveDirection,
                 signal.EntryPrice,
                 bid,
                 ask,
                 isOpposite);
+            return CTraderOrderType.Stop;
         }
 
         var entry = (double)signal.EntryPrice.Value;
