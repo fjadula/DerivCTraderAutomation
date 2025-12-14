@@ -8,8 +8,38 @@ using Websocket.Client;
 
 namespace DerivCTrader.Infrastructure.Trading;
 
-public class DerivWebSocketClient : IDerivClient, IDisposable
+public class DerivWebSocketClient : IDerivClient, DerivCTrader.Infrastructure.Deriv.IDerivTickProvider, IDisposable
 {
+    // Tick subscription support for price probe
+    public event EventHandler<DerivCTrader.Infrastructure.Deriv.DerivTickEventArgs>? TickReceived;
+    private readonly Dictionary<string, string> _activeTickSubscriptions = new(); // symbol -> subscriptionId
+    private IDisposable? _tickMessageSubscription; // Persistent subscription for tick events
+
+    public async Task<string> SubscribeTickAsync(string symbol)
+    {
+        if (!_isConnected)
+        {
+            await ConnectAsync();
+        }
+        var req = new { ticks = symbol, subscribe = 1 };
+        var response = await SendRequestAsync(req);
+        var subId = response?["tick" ]?["id"]?.ToString() ?? response?["subscription"]?["id"]?.ToString();
+        if (!string.IsNullOrEmpty(subId))
+        {
+            _activeTickSubscriptions[symbol] = subId;
+        }
+        return subId ?? string.Empty;
+    }
+
+    public async Task UnsubscribeTickAsync(string subscriptionId)
+    {
+        var req = new { forget = subscriptionId };
+        await SendRequestAsync(req);
+        // Remove from active subscriptions
+        var toRemove = _activeTickSubscriptions.Where(kv => kv.Value == subscriptionId).Select(kv => kv.Key).ToList();
+        foreach (var key in toRemove)
+            _activeTickSubscriptions.Remove(key);
+    }
     private readonly ILogger<DerivWebSocketClient> _logger;
     private readonly string _wsUrl;
     private readonly string _apiToken;
@@ -53,10 +83,35 @@ public class DerivWebSocketClient : IDerivClient, IDisposable
             });
 
             await _client.Start();
-            
+
+            // Set up persistent tick message handler (separate from request/response flow)
+            _tickMessageSubscription = _client.MessageReceived.Subscribe(msg =>
+            {
+                try
+                {
+                    var response = JObject.Parse(msg.Text ?? "{}");
+                    if (response["tick"] != null)
+                    {
+                        var tick = response["tick"];
+                        var symbol = tick?["symbol"]?.ToString() ?? string.Empty;
+                        var priceStr = tick?["quote"]?.ToString();
+                        if (decimal.TryParse(priceStr, System.Globalization.NumberStyles.Any,
+                            System.Globalization.CultureInfo.InvariantCulture, out var price))
+                        {
+                            _logger.LogDebug("[TICK] Received tick: Symbol={Symbol}, Price={Price}", symbol, price);
+                            TickReceived?.Invoke(this, new DerivCTrader.Infrastructure.Deriv.DerivTickEventArgs { Symbol = symbol, Price = price });
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Error processing tick message");
+                }
+            });
+
             // Authorize
             await AuthorizeAsync();
-            
+
             _isConnected = true;
             _logger.LogInformation("Connected to Deriv WebSocket API");
         }
@@ -201,12 +256,13 @@ public class DerivWebSocketClient : IDerivClient, IDisposable
         var requestJson = JsonConvert.SerializeObject(request);
         var tcs = new TaskCompletionSource<JObject?>();
 
-        // Subscribe to messages
+        // Subscribe to messages (tick events are handled by persistent _tickMessageSubscription)
         var subscription = _client.MessageReceived.Subscribe(msg =>
         {
             try
             {
                 var response = JObject.Parse(msg.Text ?? "{}");
+                // Note: tick events are now handled by persistent subscription in ConnectAsync
                 tcs.TrySetResult(response);
             }
             catch (Exception ex)
@@ -220,14 +276,14 @@ public class DerivWebSocketClient : IDerivClient, IDisposable
 
         // Wait for response with timeout
         var responseTask = await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(30)));
-        
+
         subscription.Dispose();
 
         if (responseTask == tcs.Task)
         {
             return await tcs.Task;
         }
-        
+
         throw new TimeoutException("Deriv API request timed out");
     }
 
@@ -237,6 +293,8 @@ public class DerivWebSocketClient : IDerivClient, IDisposable
     {
         if (_client != null)
         {
+            _tickMessageSubscription?.Dispose();
+            _tickMessageSubscription = null;
             await _client.Stop(WebSocketCloseStatus.NormalClosure, "Closing connection");
             _isConnected = false;
             _logger.LogInformation("Disconnected from Deriv WebSocket");
@@ -294,6 +352,7 @@ public class DerivWebSocketClient : IDerivClient, IDisposable
 
     public void Dispose()
     {
+        _tickMessageSubscription?.Dispose();
         _client?.Dispose();
     }
 }

@@ -5,6 +5,12 @@ namespace DerivCTrader.Domain.Entities;
 public class ForexTrade
 {
     public int TradeId { get; set; }
+
+    /// <summary>
+    /// cTrader Position ID (unique identifier for the filled position)
+    /// </summary>
+    public long? PositionId { get; set; }
+
     public string Symbol { get; set; } = string.Empty;
     public string Direction { get; set; } = string.Empty;
     public decimal? EntryPrice { get; set; }
@@ -14,6 +20,12 @@ public class ForexTrade
     public decimal? PnL { get; set; }
     public decimal? PnLPercent { get; set; }
     public string? Status { get; set; }
+
+    /// <summary>
+    /// Strategy/Provider name (e.g., "TestChannel")
+    /// </summary>
+    public string? Strategy { get; set; }
+
     public string? Notes { get; set; }
     public DateTime CreatedAt { get; set; }
     public bool? IndicatorsLinked { get; set; }

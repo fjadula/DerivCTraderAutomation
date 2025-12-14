@@ -176,14 +176,14 @@ public class SqlServerTradeRepository : ITradeRepository
         if (_forexTradeIdIsIdentity == true)
         {
             const string identitySql = @"
-                INSERT INTO ForexTrades (Symbol, Direction, EntryPrice, ExitPrice, EntryTime, ExitTime, 
-                                        PnL, PnLPercent, Status, Notes, CreatedAt, IndicatorsLinked)
+                INSERT INTO ForexTrades (PositionId, Symbol, Direction, EntryPrice, ExitPrice, EntryTime, ExitTime,
+                                        PnL, PnLPercent, Status, Strategy, Notes, CreatedAt, IndicatorsLinked)
                 OUTPUT INSERTED.TradeId
-                VALUES (@Symbol, @Direction, @EntryPrice, @ExitPrice, @EntryTime, @ExitTime, 
-                       @PnL, @PnLPercent, @Status, @Notes, @CreatedAt, @IndicatorsLinked);";
+                VALUES (@PositionId, @Symbol, @Direction, @EntryPrice, @ExitPrice, @EntryTime, @ExitTime,
+                       @PnL, @PnLPercent, @Status, @Strategy, @Notes, @CreatedAt, @IndicatorsLinked);";
 
             var tradeId = await connection.ExecuteScalarAsync<int>(identitySql, trade);
-            _logger.LogInformation("Created Forex trade {TradeId} for {Symbol}", tradeId, trade.Symbol);
+            _logger.LogInformation("Created Forex trade {TradeId} for {Symbol} PositionId={PositionId}", tradeId, trade.Symbol, trade.PositionId);
             return tradeId;
         }
         else
@@ -198,15 +198,15 @@ public class SqlServerTradeRepository : ITradeRepository
             trade.TradeId = nextId;
 
             const string insertSql = @"
-                INSERT INTO ForexTrades (TradeId, Symbol, Direction, EntryPrice, ExitPrice, EntryTime, ExitTime, 
-                                        PnL, PnLPercent, Status, Notes, CreatedAt, IndicatorsLinked)
-                VALUES (@TradeId, @Symbol, @Direction, @EntryPrice, @ExitPrice, @EntryTime, @ExitTime, 
-                       @PnL, @PnLPercent, @Status, @Notes, @CreatedAt, @IndicatorsLinked);";
+                INSERT INTO ForexTrades (TradeId, PositionId, Symbol, Direction, EntryPrice, ExitPrice, EntryTime, ExitTime,
+                                        PnL, PnLPercent, Status, Strategy, Notes, CreatedAt, IndicatorsLinked)
+                VALUES (@TradeId, @PositionId, @Symbol, @Direction, @EntryPrice, @ExitPrice, @EntryTime, @ExitTime,
+                       @PnL, @PnLPercent, @Status, @Strategy, @Notes, @CreatedAt, @IndicatorsLinked);";
 
             await connection.ExecuteAsync(insertSql, trade, transaction: tx);
             tx.Commit();
 
-            _logger.LogInformation("Created Forex trade {TradeId} for {Symbol}", nextId, trade.Symbol);
+            _logger.LogInformation("Created Forex trade {TradeId} for {Symbol} PositionId={PositionId}", nextId, trade.Symbol, trade.PositionId);
             return nextId;
         }
     }

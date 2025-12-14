@@ -31,6 +31,10 @@ public class DerivBinaryExecutorService : BackgroundService
     private readonly IBinaryExpiryCalculator _expiryCalculator;
     private readonly decimal _defaultStake;
     private readonly int _pollIntervalSeconds;
+    private readonly System.Threading.SemaphoreSlim _wakeSemaphore = new(0, 1);
+
+    // Expose a method for external event to trigger processing
+    public void WakeUp() => _wakeSemaphore.Release();
 
     public DerivBinaryExecutorService(
         ILogger<DerivBinaryExecutorService> logger,
@@ -119,8 +123,15 @@ public class DerivBinaryExecutorService : BackgroundService
         {
             try
             {
+                var nowStart = DateTime.UtcNow.ToString("O");
+                _logger.LogInformation("[TIMING] {Now} DerivBinaryExecutorService: Starting ProcessTradeExecutionQueueAsync", nowStart);
                 await ProcessTradeExecutionQueueAsync(stoppingToken);
-                await Task.Delay(TimeSpan.FromSeconds(_pollIntervalSeconds), stoppingToken);
+
+                // Wait for either a wake-up event or poll interval
+                var delayTask = Task.Delay(TimeSpan.FromSeconds(_pollIntervalSeconds), stoppingToken);
+                var wakeTask = _wakeSemaphore.WaitAsync(stoppingToken);
+                var completed = await Task.WhenAny(delayTask, wakeTask);
+                // If wakeTask completes, just loop and process immediately
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -174,8 +185,9 @@ public class DerivBinaryExecutorService : BackgroundService
 
     private async Task ProcessQueueEntryAsync(TradeExecutionQueue queueEntry, CancellationToken cancellationToken)
     {
-        _logger.LogInformation("🔨 Processing queue entry #{QueueId}: {Asset} {Direction} (cTrader OrderId: {OrderId})",
-            queueEntry.QueueId, queueEntry.Asset, queueEntry.Direction, queueEntry.CTraderOrderId);
+        var now = DateTime.UtcNow.ToString("O");
+        _logger.LogInformation("[TIMING] {Now} Processing queue entry #{QueueId}: {Asset} {Direction} (cTrader OrderId: {OrderId})",
+            now, queueEntry.QueueId, queueEntry.Asset, queueEntry.Direction, queueEntry.CTraderOrderId);
         Console.WriteLine($"🔨 Queue #{queueEntry.QueueId}: {queueEntry.Asset} {queueEntry.Direction}");
         Console.WriteLine($"   cTrader OrderId: {queueEntry.CTraderOrderId}");
         Console.WriteLine($"   Strategy: {queueEntry.StrategyName}");
@@ -209,7 +221,8 @@ public class DerivBinaryExecutorService : BackgroundService
             throw new Exception($"Deriv execution failed: {result.ErrorMessage}");
         }
 
-        _logger.LogInformation("✅ Deriv binary executed successfully");
+        var nowOrder = DateTime.UtcNow.ToString("O");
+        _logger.LogInformation("[TIMING] {Now} ✅ Deriv binary executed successfully", nowOrder);
         Console.WriteLine($"   ✅ Deriv binary executed!");
         Console.WriteLine($"   📝 Contract ID: {result.ContractId}");
         Console.WriteLine($"   💰 Purchase Price: ${result.PurchasePrice}");

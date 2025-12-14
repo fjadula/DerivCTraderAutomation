@@ -23,7 +23,8 @@ public class TradeExecutionQueue
     public int QueueId { get; set; }
 
     /// <summary>
-    /// cTrader order ID from execution event
+    /// cTrader Position ID from execution event (not OrderId)
+    /// This is the unique position identifier used for tracking fills
     /// </summary>
     public string? CTraderOrderId { get; set; }
 
@@ -41,7 +42,7 @@ public class TradeExecutionQueue
 
     /// <summary>
     /// Strategy name to populate in BinaryOptionTrades
-    /// Format: "ProviderName_Asset_Timestamp"
+    /// Format: Just the provider name (e.g., "TestChannel")
     /// </summary>
     public string? StrategyName { get; set; }
 

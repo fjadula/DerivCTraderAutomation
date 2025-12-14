@@ -9,6 +9,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Serilog;
+using Microsoft.Extensions.Logging;
 
 namespace DerivCTrader.TradeExecutor;
 
@@ -112,14 +113,36 @@ class Program
                     services.AddSingleton<IBinaryExpiryCalculator, BinaryExpiryCalculator>();
 
                     // cTrader services
+
                     services.AddCTraderServices(configuration);
+
+                    // Register SQL Server push notification service (singleton)
+                    services.AddSingleton<SignalSqlNotificationService>(sp =>
+                    {
+                        var config = sp.GetRequiredService<IConfiguration>();
+                        var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
+                        var logger = loggerFactory.CreateLogger<SignalSqlNotificationService>();
+                        var connStr = config.GetConnectionString("ConnectionString")!;
+                        var svc = new SignalSqlNotificationService(connStr, logger);
+                        svc.StartListening();
+                        return svc;
+                    });
 
                     // Register background services (ORDER MATTERS - Symbol initializer must run first!)
                     services.AddHostedService<CTraderSymbolInitializerService>(); // FIRST: Initialize cTrader & symbols
                     services.AddHostedService<CTraderForexProcessorService>();    // Process forex signals -> cTrader
-                    services.AddHostedService<DerivBinaryExecutorService>();      // Process TradeExecutionQueue -> Deriv
+
+                    // Register DerivBinaryExecutorService as singleton and hosted service for event-driven injection
+                    services.AddSingleton<DerivBinaryExecutorService>();
+                    services.AddHostedService(sp => sp.GetRequiredService<DerivBinaryExecutorService>());
+
                     services.AddHostedService<BinaryExecutionService>();          // Process pure binary signals -> Deriv
                     services.AddHostedService<OutcomeMonitorService>();
+
+                    // TODO: Wire up SignalSqlNotificationService.SignalChanged to trigger processing in background services
+
+                    // Bridge: Hosted service to wire up SQL notification to DerivBinaryExecutorService
+                    services.AddHostedService<SqlToDerivExecutorBridgeService>();
 
                     Log.Information("Services registered successfully");
                 })

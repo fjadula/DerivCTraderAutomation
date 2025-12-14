@@ -41,6 +41,7 @@ public static class CTraderServiceExtensions
         services.AddSingleton<ICTraderSymbolService, CTraderSymbolService>();
         services.AddSingleton<ICTraderPriceMonitor, CTraderPriceMonitor>();
         services.AddSingleton<ICTraderPendingOrderService, CTraderPendingOrderService>();
+        services.AddSingleton<DerivCTrader.Infrastructure.Deriv.IDerivTickProvider, DerivCTrader.Infrastructure.Trading.DerivWebSocketClient>();
 
         return services;
     }

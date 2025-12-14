@@ -17,12 +17,35 @@ namespace DerivCTrader.Infrastructure.CTrader;
 /// </summary>
 public class CTraderPendingOrderService : ICTraderPendingOrderService
 {
+    /// <summary>
+    /// Determines if the asset is a Deriv synthetic index (used for special order classification logic).
+    /// </summary>
+    private static bool IsSyntheticAsset(string asset)
+    {
+        if (string.IsNullOrWhiteSpace(asset))
+            return false;
+        // Example: Deriv synthetics often start with 'R_', 'BOOM', 'CRASH', etc.
+        return asset.StartsWith("R_", StringComparison.OrdinalIgnoreCase)
+            || asset.StartsWith("BOOM", StringComparison.OrdinalIgnoreCase)
+            || asset.StartsWith("CRASH", StringComparison.OrdinalIgnoreCase)
+            || asset.StartsWith("VOL", StringComparison.OrdinalIgnoreCase)
+            || asset.StartsWith("JUMP", StringComparison.OrdinalIgnoreCase)
+            || asset.StartsWith("STEP", StringComparison.OrdinalIgnoreCase)
+            || asset.StartsWith("BEAR", StringComparison.OrdinalIgnoreCase)
+            || asset.StartsWith("BULL", StringComparison.OrdinalIgnoreCase)
+            || asset.StartsWith("WS", StringComparison.OrdinalIgnoreCase)
+            || asset.Contains("SYNTH", StringComparison.OrdinalIgnoreCase)
+            || asset.Contains("Volatility", StringComparison.OrdinalIgnoreCase)
+            || asset.Contains("Crash", StringComparison.OrdinalIgnoreCase)
+            || asset.Contains("Boom", StringComparison.OrdinalIgnoreCase);
+    }
     private readonly ILogger<CTraderPendingOrderService> _logger;
     private readonly ICTraderClient _client;
     private readonly ICTraderOrderManager _orderManager;
     private readonly ICTraderSymbolService _symbolService;
     private readonly ITradeRepository _repository;
     private readonly ITelegramNotifier _telegram;
+    private readonly DerivCTrader.Infrastructure.Deriv.IDerivTickProvider _derivTickProvider;
 
     private readonly Dictionary<long, PendingExecutionWatch> _pendingExecutions = new();
     private readonly object _pendingLock = new();
@@ -39,7 +62,8 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
         ICTraderOrderManager orderManager,
         ICTraderSymbolService symbolService,
         ITradeRepository repository,
-        ITelegramNotifier telegram)
+        ITelegramNotifier telegram,
+        DerivCTrader.Infrastructure.Deriv.IDerivTickProvider derivTickProvider)
     {
         _logger = logger;
         _client = client;
@@ -47,6 +71,7 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
         _symbolService = symbolService;
         _repository = repository;
         _telegram = telegram;
+        _derivTickProvider = derivTickProvider;
 
         // Subscribe to execution events from cTrader.
         // This is the most reliable way to detect pending order fills.
@@ -112,179 +137,121 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
 
             _logger.LogDebug("[DEBUG] Begin ProcessSignalAsync for SignalId={SignalId}, IsOpposite={IsOpposite}, EntryPrice={EntryPrice}", signal.SignalId, isOpposite, signal.EntryPrice);
 
-            // Check if we have this symbol
-            if (!_symbolService.HasSymbol(signal.Asset))
-            {
-                _logger.LogWarning("Unknown symbol: {Asset}", signal.Asset);
-                _logger.LogDebug("[DEBUG] Unknown symbol for SignalId={SignalId}: {Asset}", signal.SignalId, signal.Asset);
-                return new CTraderOrderResult
-                {
-                    Success = false,
-                    ErrorMessage = $"Unknown symbol: {signal.Asset}"
-                };
-            }
 
-            // If EntryPrice exists, this is a real pending order (Limit/Stop) and should be placed on cTrader.
-            // We enqueue to TradeExecutionQueue only after we see the actual execution event.
             if (signal.EntryPrice.HasValue)
             {
-                // --- Marketability check: prevent instantly filled pending orders ---
-                var resolvedOrderType = await InferPendingOrderTypeAsync(signal, effectiveDirection, isOpposite);
-                var bidAsk = await _orderManager.GetCurrentBidAskAsync(signal.Asset);
-                double? marketPrice = null;
-
-                // Retry once if we couldn't get bid/ask - spot subscription might need time
-                if (!bidAsk.Bid.HasValue && !bidAsk.Ask.HasValue)
+                CTraderOrderType resolvedOrderType;
+                if (IsSyntheticAsset(signal.Asset))
                 {
-                    _logger.LogDebug("[DEBUG] First bid/ask fetch failed for {Asset}, retrying after 500ms...", signal.Asset);
-                    await Task.Delay(TimeSpan.FromMilliseconds(500));
-                    bidAsk = await _orderManager.GetCurrentBidAskAsync(signal.Asset);
-                }
-
-                if (bidAsk.Bid.HasValue && bidAsk.Ask.HasValue)
-                    marketPrice = (bidAsk.Bid.Value + bidAsk.Ask.Value) / 2.0;
-                else if (bidAsk.Ask.HasValue)
-                    marketPrice = bidAsk.Ask.Value;
-                else if (bidAsk.Bid.HasValue)
-                    marketPrice = bidAsk.Bid.Value;
-
-                bool isMarketable = false;
-                double entryPrice = (double)signal.EntryPrice.Value;
-
-                if (marketPrice.HasValue)
-                {
-                    // Calculate the minimum distance from market price (use a small buffer to avoid edge cases)
-                    // Use a relative buffer of 0.0001 (1 pip for most forex) or absolute buffer if price is very small
-                    double minBuffer = Math.Max(marketPrice.Value * 0.0001, 0.0001);
-
+                    // Use Deriv price probe for classification
+                    _logger.LogInformation("[SYNTHETIC] Using Deriv price probe for order type classification: {Asset}", signal.Asset);
+                    // Map signal.Asset to Deriv symbol for tick subscription
+                    string derivSymbol = MapToDerivSymbol(signal.Asset);
+                    var semaphore = new System.Threading.SemaphoreSlim(3, 3); // Should be injected/shared in real code
+                    await using var probe = new DerivCTrader.Infrastructure.Deriv.DerivPriceProbe(_derivTickProvider, derivSymbol, semaphore);
+                    var price = await probe.ProbeAsync();
+                    if (!price.HasValue)
+                    {
+                        _logger.LogError("[SYNTHETIC] Deriv price probe failed: Asset={Asset}. Marking as UNCLASSIFIED.", signal.Asset);
+                        // Mark as UNCLASSIFIED (could update DB or return special result)
+                        return new CTraderOrderResult
+                        {
+                            Success = false,
+                            ErrorMessage = "Deriv price unavailable for synthetic; signal marked UNCLASSIFIED."
+                        };
+                    }
+                    var entry = (decimal)signal.EntryPrice.Value;
                     if (effectiveDirection == TradeDirection.Buy)
-                    {
-                        // For Buy Limit, EntryPrice < MarketPrice is valid; EntryPrice >= MarketPrice is marketable
-                        if (resolvedOrderType == CTraderOrderType.Limit && entryPrice >= (marketPrice.Value - minBuffer))
-                            isMarketable = true;
-                        // For Buy Stop, EntryPrice > MarketPrice is valid; EntryPrice <= MarketPrice is marketable
-                        if (resolvedOrderType == CTraderOrderType.Stop && entryPrice <= (marketPrice.Value + minBuffer))
-                            isMarketable = true;
-                    }
+                        resolvedOrderType = entry > price.Value ? CTraderOrderType.Stop : CTraderOrderType.Limit;
                     else if (effectiveDirection == TradeDirection.Sell)
-                    {
-                        // For Sell Limit, EntryPrice > MarketPrice is valid; EntryPrice <= MarketPrice is marketable
-                        if (resolvedOrderType == CTraderOrderType.Limit && entryPrice <= (marketPrice.Value + minBuffer))
-                            isMarketable = true;
-                        // For Sell Stop, EntryPrice < MarketPrice is valid; EntryPrice >= MarketPrice is marketable
-                        if (resolvedOrderType == CTraderOrderType.Stop && entryPrice >= (marketPrice.Value - minBuffer))
-                            isMarketable = true;
-                    }
-
-                    _logger.LogInformation(
-                        "[MARKETABILITY] Asset={Asset}, Direction={Direction}, OrderType={OrderType}, EntryPrice={EntryPrice}, MarketPrice={MarketPrice}, Bid={Bid}, Ask={Ask}, IsMarketable={IsMarketable}",
-                        signal.Asset, effectiveDirection, resolvedOrderType, entryPrice, marketPrice.Value, bidAsk.Bid, bidAsk.Ask, isMarketable);
+                        resolvedOrderType = entry < price.Value ? CTraderOrderType.Stop : CTraderOrderType.Limit;
+                    else
+                        resolvedOrderType = CTraderOrderType.Limit;
+                    if (entry == price.Value)
+                        resolvedOrderType = CTraderOrderType.Stop; // Default to STOP if equal
+                    _logger.LogInformation("[SYNTHETIC] Classified order type: {OrderType} (Entry={Entry}, Price={Price})", resolvedOrderType, entry, price);
                 }
                 else
                 {
-                    // Cannot get market price - this commonly happens for synthetic indices on Deriv cTrader
-                    // where spot subscription doesn't stream price ticks.
-                    // Instead of skipping the order, we proceed with the pending order.
-                    // The broker will handle it appropriately:
-                    //   - If the entry price is favorable (not marketable), it stays as pending
-                    //   - If the entry price is at/beyond market, it may fill immediately as market
-                    _logger.LogWarning(
-                        "[CTraderPendingOrderService] Bid/Ask unavailable - proceeding with order anyway. Asset={Asset}, Direction={Direction}, EntryPrice={EntryPrice}, OrderType={OrderType}",
-                        signal.Asset, effectiveDirection, signal.EntryPrice, resolvedOrderType);
-                    // Skip marketability check - let the broker handle it
+                    resolvedOrderType = await InferPendingOrderTypeAsync(signal, effectiveDirection, isOpposite);
                 }
 
-                if (isMarketable)
-                {
-                    _logger.LogWarning("[CTraderPendingOrderService] Skipping marketable pending order: Asset={Asset}, Direction={Direction}, EntryPrice={EntryPrice}, MarketPrice={MarketPrice}, OrderType={OrderType}", signal.Asset, effectiveDirection, signal.EntryPrice, marketPrice, resolvedOrderType);
-                    return new CTraderOrderResult { Success = false, ErrorMessage = "Marketable pending order would be filled instantly." };
-                }
-                // --- End marketability check ---
-
-                _logger.LogInformation("[DEBUG] About to create order: Asset={Asset} EntryPrice={EntryPrice} OrderType={OrderType} Bid={Bid} Ask={Ask}", signal.Asset, signal.EntryPrice, resolvedOrderType, bidAsk.Bid, bidAsk.Ask);
+                _logger.LogInformation("[DEBUG] About to create order: Asset={Asset} EntryPrice={EntryPrice} OrderType={OrderType}", signal.Asset, signal.EntryPrice, resolvedOrderType);
                 var pendingResult = await _orderManager.CreateOrderAsync(signal, resolvedOrderType, isOpposite);
-
-                _logger.LogDebug("[DEBUG] CreateOrderAsync returned: Success={Success}, OrderId={OrderId}, PositionId={PositionId}, SltpApplied={SltpApplied}",
-                    pendingResult.Success, pendingResult.OrderId, pendingResult.PositionId, pendingResult.SltpApplied);
 
                 if (!pendingResult.Success || !pendingResult.OrderId.HasValue)
                 {
-                    _logger.LogError("Failed to place pending order: {Error}", pendingResult.ErrorMessage);
-                    _logger.LogDebug("[DEBUG] Failed to place pending order for SignalId={SignalId}: {Error}", signal.SignalId, pendingResult.ErrorMessage);
+                    _logger.LogWarning("[DEBUG] Order creation failed or no OrderId returned: SignalId={SignalId}, Error={Error}", signal.SignalId, pendingResult.ErrorMessage);
                     return pendingResult;
                 }
 
-                if (signal.SignalId > 0)
+                var orderId = pendingResult.OrderId.Value;
+                _logger.LogDebug("[DEBUG] Pending order placed: SignalId={SignalId}, OrderId={OrderId}, Type={OrderType}", signal.SignalId, orderId, resolvedOrderType);
+
+                // Track in-memory that we placed an order for this signal leg
+                lock (_placedOrdersLock)
                 {
-                    lock (_placedOrdersLock)
-                    {
-                        _placedOrdersBySignalLeg[(signal.SignalId, isOpposite)] = pendingResult.OrderId.Value;
-                        _logger.LogDebug("[DEBUG] Added to _placedOrdersBySignalLeg: SignalId={SignalId}, IsOpposite={IsOpposite}, OrderId={OrderId}", signal.SignalId, isOpposite, pendingResult.OrderId.Value);
-                    }
+                    _placedOrdersBySignalLeg[(signal.SignalId, isOpposite)] = orderId;
                 }
 
-                // If cTrader filled the order immediately (can happen when entry is already crossable),
-                // don't add a watch (the execution event may already have been consumed by the request wait).
-                if (pendingResult.PositionId.HasValue && pendingResult.PositionId.Value > 0)
-                {
-                    _logger.LogInformation(
-                        "🎯 Pending order filled immediately: OrderId={OrderId}, PositionId={PositionId}. Enqueuing TradeExecutionQueue now...",
-                        pendingResult.OrderId.Value,
-                        pendingResult.PositionId.Value);
+                // Determine if order filled immediately (has PositionId and ExecutedAt)
+                var isImmediateFill = pendingResult.PositionId.HasValue && pendingResult.PositionId.Value > 0 && pendingResult.ExecutedAt != default;
 
-                    _logger.LogDebug("[DEBUG] Immediate fill: SignalId={SignalId}, OrderId={OrderId}, PositionId={PositionId}", signal.SignalId, pendingResult.OrderId.Value, pendingResult.PositionId.Value);
+                if (isImmediateFill)
+                {
+                    // Order filled immediately - persist and enqueue now
+                    _logger.LogInformation("[IMMEDIATE-FILL] Order {OrderId} filled immediately with PositionId={PositionId}", orderId, pendingResult.PositionId);
 
                     await PersistForexTradeFillAsync(
                         signal,
-                        cTraderOrderId: pendingResult.OrderId.Value,
-                        positionId: pendingResult.PositionId.Value,
+                        cTraderOrderId: orderId,
+                        positionId: pendingResult.PositionId!.Value,
                         effectiveDirection,
                         isOpposite,
-                        executedPrice: pendingResult.ExecutedPrice,
-                        sltpApplied: pendingResult.SltpApplied);
+                        pendingResult.ExecutedPrice,
+                        pendingResult.SltpApplied);
 
                     await NotifyFillAsync(
                         signal,
-                        cTraderOrderId: pendingResult.OrderId.Value,
-                        positionId: pendingResult.PositionId.Value,
+                        cTraderOrderId: orderId,
+                        positionId: pendingResult.PositionId!.Value,
                         effectiveDirection,
                         isOpposite,
-                        executedPrice: pendingResult.ExecutedPrice,
-                        sltpApplied: pendingResult.SltpApplied);
+                        pendingResult.ExecutedPrice,
+                        pendingResult.SltpApplied);
 
-                    await EnqueueExecutedTradeAsync(signal, pendingResult.OrderId.Value, isOpposite, effectiveDirection);
-
-                    // NOTE: Do NOT mark as processed here!
-                    // The calling CTraderForexProcessorService will handle marking as processed
-                    // AFTER both original and opposite orders have been attempted.
-                    // This ensures opposite orders can still be created even if the original fills immediately.
-                    _logger.LogDebug("[DEBUG] Immediate fill complete for SignalId={SignalId}, IsOpposite={IsOpposite}. Processed flag will be set by caller.", signal.SignalId, isOpposite);
-
-                    return pendingResult;
-                }
-
-                lock (_pendingLock)
-                {
-                    _pendingExecutions[pendingResult.OrderId.Value] = new PendingExecutionWatch
+                    // Mark signal as processed on immediate fill
+                    if (signal.SignalId > 0)
                     {
-                        OrderId = pendingResult.OrderId.Value,
+                        _logger.LogInformation("[PRE] Calling MarkSignalAsProcessedAsync for SignalId={SignalId} (immediate fill)", signal.SignalId);
+                        await _repository.MarkSignalAsProcessedAsync(signal.SignalId);
+                        _logger.LogInformation("[POST] MarkSignalAsProcessedAsync completed for SignalId={SignalId} (immediate fill)", signal.SignalId);
+                    }
+
+                    // Enqueue for Deriv binary execution (use PositionId, not OrderId)
+                    await EnqueueExecutedTradeAsync(signal, pendingResult.PositionId!.Value, isOpposite, effectiveDirection);
+                }
+                else
+                {
+                    // Order accepted but pending - add to tracking for later fill
+                    _logger.LogInformation("[PENDING] Order {OrderId} accepted, waiting for fill. Adding to _pendingExecutions.", orderId);
+
+                    var watch = new PendingExecutionWatch
+                    {
+                        OrderId = orderId,
                         Signal = signal,
                         EffectiveDirection = effectiveDirection,
                         IsOpposite = isOpposite,
                         CreatedAt = DateTime.UtcNow
                     };
-                    _logger.LogDebug("[DEBUG] Added to _pendingExecutions: OrderId={OrderId}, SignalId={SignalId}, IsOpposite={IsOpposite}", pendingResult.OrderId.Value, signal.SignalId, isOpposite);
+
+                    lock (_pendingLock)
+                    {
+                        _pendingExecutions[orderId] = watch;
+                    }
+
+                    _logger.LogDebug("[DEBUG] Added to _pendingExecutions: OrderId={OrderId}, SignalId={SignalId}, IsOpposite={IsOpposite}", orderId, signal.SignalId, isOpposite);
                 }
-
-                _logger.LogInformation(
-                    "✅ Pending order placed on cTrader: OrderId={OrderId}, Asset={Asset}, Direction={Direction}, Type={OrderType}, Entry={Entry}",
-                    pendingResult.OrderId.Value,
-                    signal.Asset,
-                    effectiveDirection,
-                    resolvedOrderType,
-                    signal.EntryPrice);
-
-                _logger.LogDebug("[DEBUG] Pending order placed: SignalId={SignalId}, OrderId={OrderId}, Type={OrderType}", signal.SignalId, pendingResult.OrderId.Value, resolvedOrderType);
 
                 return pendingResult;
             }
@@ -310,12 +277,19 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
         }
     }
 
-    /// <summary>
-    /// NOTE: Legacy price-cross -> market execution flow has been removed.
-    /// Pending order fills are detected via execution events (ProtoOAExecutionEvent).
-    /// </summary>
-    // (kept intentionally empty)
-
+    // Map cTrader/Telegram asset name to Deriv symbol for tick subscription
+    private static string MapToDerivSymbol(string asset)
+    {
+        // Example: "Volatility 25" => "1HZ25V"
+        if (asset.Contains("Volatility", StringComparison.OrdinalIgnoreCase))
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(asset, @"(\d+)");
+            if (match.Success)
+                return $"1HZ{match.Value}V";
+        }
+        // Add more mappings as needed for other synthetics
+        return asset.Replace(" ", ""); // fallback: remove spaces
+    }
     private void OnClientMessageReceived(object? sender, CTraderMessage message)
     {
         try
@@ -376,6 +350,8 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
             var orderId = execEvent.Order?.OrderId ?? watch.OrderId;
             var positionId = TryExtractPositionId(execEvent);
             var executedPrice = TryExtractExecutedPrice(execEvent);
+            _logger.LogInformation("[TRACE] Entered HandlePendingExecutionAsync: OrderId={OrderId}, PositionId={PositionId}, Asset={Asset}, Direction={Direction}, IsOpposite={IsOpposite}",
+                orderId, positionId, watch.Signal.Asset, watch.EffectiveDirection, watch.IsOpposite);
 
             _logger.LogInformation(
                 "🎯 Pending order FILLED: OrderId={OrderId}, PositionId={PositionId}, Asset={Asset}, Direction={Direction}",
@@ -439,8 +415,17 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
                 }
             }
 
-            // Enqueue execution for Deriv.
-            await EnqueueExecutedTradeAsync(watch.Signal, orderId, watch.IsOpposite, watch.EffectiveDirection);
+            // Enqueue execution for Deriv (use PositionId, not OrderId)
+            if (positionId.HasValue && positionId.Value > 0)
+            {
+                await EnqueueExecutedTradeAsync(watch.Signal, positionId.Value, watch.IsOpposite, watch.EffectiveDirection);
+            }
+            else
+            {
+                _logger.LogWarning("[ENQUEUE-SKIP] No valid PositionId available for OrderId={OrderId}, skipping queue entry", orderId);
+            }
+            _logger.LogInformation("[TRACE] Exiting HandlePendingExecutionAsync: OrderId={OrderId}, PositionId={PositionId}, Asset={Asset}, Direction={Direction}, IsOpposite={IsOpposite}",
+                watch.OrderId, positionId, watch.Signal.Asset, watch.EffectiveDirection, watch.IsOpposite);
         }
         catch (Exception ex)
         {
@@ -468,6 +453,7 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
 
             var trade = new ForexTrade
             {
+                PositionId = positionId,
                 Symbol = signal.Asset ?? string.Empty,
                 Direction = effectiveDirection.ToString(),
                 // Persist the requested entry from the signal as the trade's EntryPrice.
@@ -475,6 +461,7 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
                 EntryPrice = signal.EntryPrice ?? (executedPrice.HasValue ? (decimal?)Convert.ToDecimal(executedPrice.Value) : null),
                 EntryTime = DateTime.UtcNow,
                 Status = "OPEN",
+                Strategy = BuildStrategyName(signal),
                 CreatedAt = DateTime.UtcNow,
                 Notes = BuildForexNotes(signal, cTraderOrderId, positionId, isOpposite, sltpApplied, executedPrice),
                 // DB column is NOT NULL; default to false until indicators are linked.
@@ -771,20 +758,22 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
 
     private string BuildStrategyName(ParsedSignal signal)
     {
-        // Format: ProviderName_Asset_Timestamp
-        return $"{signal.ProviderName}_{signal.Asset}_{DateTime.UtcNow:yyyyMMddHHmmss}";
+        // Just return the provider name (e.g., "TestChannel")
+        return signal.ProviderName ?? "Unknown";
     }
 
-    private async Task EnqueueExecutedTradeAsync(ParsedSignal executedSignal, long cTraderOrderId, bool isOpposite)
+    private async Task EnqueueExecutedTradeAsync(ParsedSignal executedSignal, long positionId, bool isOpposite)
     {
-        await EnqueueExecutedTradeAsync(executedSignal, cTraderOrderId, isOpposite, GetEffectiveDirection(executedSignal.Direction, isOpposite));
+        await EnqueueExecutedTradeAsync(executedSignal, positionId, isOpposite, GetEffectiveDirection(executedSignal.Direction, isOpposite));
     }
 
-    private async Task EnqueueExecutedTradeAsync(ParsedSignal executedSignal, long cTraderOrderId, bool isOpposite, TradeDirection effectiveDirection)
+    private async Task EnqueueExecutedTradeAsync(ParsedSignal executedSignal, long positionId, bool isOpposite, TradeDirection effectiveDirection)
     {
+        _logger.LogInformation("[TRACE] Entered EnqueueExecutedTradeAsync: PositionId={PositionId}, Asset={Asset}, Direction={Direction}, IsOpposite={IsOpposite}",
+            positionId, executedSignal.Asset, effectiveDirection, isOpposite);
         var queueItem = new TradeExecutionQueue
         {
-            CTraderOrderId = cTraderOrderId.ToString(),
+            CTraderOrderId = positionId.ToString(),  // Store PositionId (not OrderId)
             Asset = executedSignal.Asset,
             Direction = effectiveDirection.ToString(),
             StrategyName = BuildStrategyName(executedSignal),
@@ -795,12 +784,14 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
 
         var queueId = await _repository.EnqueueTradeAsync(queueItem);
         _logger.LogInformation(
-            "💾 Written to TradeExecutionQueue: QueueId={QueueId}, OrderId={OrderId}, Asset={Asset}, Direction={Direction}, IsOpposite={IsOpposite}",
+            "💾 Written to TradeExecutionQueue: QueueId={QueueId}, PositionId={PositionId}, Asset={Asset}, Direction={Direction}, IsOpposite={IsOpposite}",
             queueId,
-            cTraderOrderId,
+            positionId,
             executedSignal.Asset,
             effectiveDirection,
             isOpposite);
+        _logger.LogInformation("[TRACE] Exiting EnqueueExecutedTradeAsync: QueueId={QueueId}, PositionId={PositionId}, Asset={Asset}, Direction={Direction}, IsOpposite={IsOpposite}",
+            queueId, positionId, executedSignal.Asset, effectiveDirection, isOpposite);
     }
 
     private static TradeDirection GetEffectiveDirection(TradeDirection direction, bool isOpposite)
@@ -881,67 +872,9 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
                 return CTraderOrderType.Stop;
         }
 
-        // 2) Otherwise infer from current price vs entry.
-        // This prevents placing a marketable LIMIT (which fills immediately and looks like a market execution).
-        if (!signal.EntryPrice.HasValue || string.IsNullOrWhiteSpace(signal.Asset))
-            return CTraderOrderType.Limit;
-
-        var (bid, ask) = await _orderManager.GetCurrentBidAskAsync(signal.Asset);
-        if (isOpposite && !bid.HasValue && !ask.HasValue)
-        {
-            // Best-effort retry: ticks/subscription can lag right after startup.
-            await Task.Delay(TimeSpan.FromMilliseconds(500));
-            (bid, ask) = await _orderManager.GetCurrentBidAskAsync(signal.Asset);
-        }
-
-        // Use the relevant side of the market for marketability checks.
-        // BUY uses ASK (fills if ask <= limit), SELL uses BID (fills if bid >= limit).
-        var current = (effectiveDirection == TradeDirection.Buy || effectiveDirection == TradeDirection.Call)
-            ? ask
-            : bid;
-
-        // Fallback to mid if we couldn't get bid/ask.
-        current ??= await _orderManager.GetCurrentPriceAsync(signal.Asset);
-
-        if (!current.HasValue || current.Value <= 0)
-        {
-            // Spot price unavailable (common for synthetic indices on Deriv cTrader).
-            // Default to STOP order so the order waits for price to reach entry level,
-            // rather than LIMIT which could fill immediately at a "better" price.
-            _logger.LogWarning(
-                "InferPendingOrderType: spot price unavailable; defaulting to STOP order. Asset={Asset} Dir={Dir} Entry={Entry} Bid={Bid} Ask={Ask} IsOpposite={IsOpposite}",
-                signal.Asset,
-                effectiveDirection,
-                signal.EntryPrice,
-                bid,
-                ask,
-                isOpposite);
-            return CTraderOrderType.Stop;
-        }
-
-        var entry = (double)signal.EntryPrice.Value;
-
-        if (isOpposite)
-        {
-            _logger.LogInformation(
-                "InferPendingOrderType: Asset={Asset} Dir={Dir} Entry={Entry} Bid={Bid} Ask={Ask} Current={Current} (IsOpposite={IsOpposite})",
-                signal.Asset,
-                effectiveDirection,
-                entry,
-                bid,
-                ask,
-                current.Value,
-                isOpposite);
-        }
-
-        // BUY: entry below/at market => LIMIT; above market => STOP
-        if (effectiveDirection == TradeDirection.Buy || effectiveDirection == TradeDirection.Call)
-            return entry <= current.Value ? CTraderOrderType.Limit : CTraderOrderType.Stop;
-
-        // SELL: entry above/at market => LIMIT; below market => STOP
-        if (effectiveDirection == TradeDirection.Sell || effectiveDirection == TradeDirection.Put)
-            return entry >= current.Value ? CTraderOrderType.Limit : CTraderOrderType.Stop;
-
+        // 2) Otherwise, for non-explicit cases, the order type must be decided by the caller (e.g., via Deriv price probe for synthetics).
+        // This method no longer infers order type from cTrader price for synthetics.
+        // For legacy non-synthetic assets, fallback to LIMIT if not specified.
         return CTraderOrderType.Limit;
     }
 
