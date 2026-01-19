@@ -51,4 +51,21 @@ public interface IDerivClient
     /// Get account balance
     /// </summary>
     Task<decimal> GetBalanceAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Get current spot price for a symbol using tick history API.
+    /// Used for Dasha Trade entry/exit price snapshots.
+    /// </summary>
+    /// <param name="symbol">Raw symbol like "USDJPY" (will be converted to Deriv format)</param>
+    /// <returns>Current spot price or null if unavailable</returns>
+    Task<decimal?> GetSpotPriceAsync(string symbol, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Get historical spot price for a symbol at a specific time.
+    /// Used for backtesting.
+    /// </summary>
+    /// <param name="symbol">Raw symbol like "EURUSD" (will be converted to Deriv format)</param>
+    /// <param name="timestamp">The UTC time to get the price for</param>
+    /// <returns>Spot price at or near the specified time, or null if unavailable</returns>
+    Task<decimal?> GetHistoricalPriceAsync(string symbol, DateTime timestamp, CancellationToken cancellationToken = default);
 }

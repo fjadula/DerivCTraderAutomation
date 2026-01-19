@@ -336,16 +336,159 @@ public class DerivClient : IDerivClient, IDisposable
         }
     }
 
+    /// <summary>
+    /// Get current spot price for a symbol using tick history API.
+    /// Returns the most recent tick price (single snapshot, not streaming).
+    /// </summary>
+    public async Task<decimal?> GetSpotPriceAsync(string symbol, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            // Convert to Deriv symbol format (e.g., USDJPY -> frxUSDJPY)
+            var derivSymbol = DerivAssetMapper.ToDerivSymbol(symbol);
+
+            _logger.LogDebug("Fetching spot price for {Symbol} ({DerivSymbol})", symbol, derivSymbol);
+
+            // Use ticks_history with count=1 to get single most recent tick
+            // This doesn't require subscription and returns immediately
+            var request = new
+            {
+                ticks_history = derivSymbol,
+                end = "latest",
+                count = 1,
+                style = "ticks",
+                req_id = _requestId++
+            };
+
+            var response = await SendAndReceiveAsync(request, cancellationToken);
+
+            if (response?["error"] != null)
+            {
+                var error = response?["error"];
+                _logger.LogWarning("Failed to get spot price for {Symbol}: {Error}",
+                    symbol, error?["message"] ?? "Unknown error");
+                return null;
+            }
+
+            // Extract the price from history response
+            // Response format: { "history": { "prices": [123.456], "times": [1234567890] } }
+            var prices = response?["history"]?["prices"];
+            if (prices == null || !prices.HasValues)
+            {
+                _logger.LogWarning("No price data returned for {Symbol}", symbol);
+                return null;
+            }
+
+            var price = prices.First?.ToObject<decimal>();
+
+            _logger.LogDebug("Got spot price for {Symbol}: {Price}", symbol, price);
+            return price;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting spot price for {Symbol}", symbol);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Get historical spot price for a symbol at a specific time.
+    /// Uses ticks_history with a specific epoch timestamp.
+    /// </summary>
+    public async Task<decimal?> GetHistoricalPriceAsync(string symbol, DateTime timestamp, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var derivSymbol = DerivAssetMapper.ToDerivSymbol(symbol);
+            var epochTime = ((DateTimeOffset)timestamp).ToUnixTimeSeconds();
+
+            _logger.LogDebug("Fetching historical price for {Symbol} at {Timestamp} (epoch: {Epoch})",
+                symbol, timestamp, epochTime);
+
+            // Use ticks_history with end=epoch to get tick at or before that time
+            var request = new
+            {
+                ticks_history = derivSymbol,
+                end = epochTime,
+                count = 1,
+                style = "ticks",
+                req_id = _requestId++
+            };
+
+            var response = await SendAndReceiveAsync(request, cancellationToken);
+
+            if (response?["error"] != null)
+            {
+                var error = response?["error"];
+                _logger.LogWarning("Failed to get historical price for {Symbol}: {Error}",
+                    symbol, error?["message"] ?? "Unknown error");
+                return null;
+            }
+
+            var prices = response?["history"]?["prices"];
+            if (prices == null || !prices.HasValues)
+            {
+                _logger.LogWarning("No historical price data returned for {Symbol} at {Timestamp}", symbol, timestamp);
+                return null;
+            }
+
+            var price = prices.First?.ToObject<decimal>();
+
+            _logger.LogDebug("Got historical price for {Symbol} at {Timestamp}: {Price}", symbol, timestamp, price);
+            return price;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting historical price for {Symbol} at {Timestamp}", symbol, timestamp);
+            return null;
+        }
+    }
+
     private async Task<JObject> SendAndReceiveAsync(object request, CancellationToken cancellationToken)
     {
         await _sendLock.WaitAsync(cancellationToken);
         try
         {
-            // Verify WebSocket is in valid state
+            // Auto-reconnect if WebSocket is not in Open state
             if (_webSocket == null || _webSocket.State != WebSocketState.Open)
             {
-                throw new InvalidOperationException(
-                    $"WebSocket is not ready for communication. State: {_webSocket?.State.ToString() ?? "null"}");
+                _logger.LogWarning("WebSocket not ready (State: {State}). Attempting reconnection...",
+                    _webSocket?.State.ToString() ?? "null");
+
+                // Try to reconnect (max 3 attempts)
+                var reconnected = false;
+                for (int attempt = 1; attempt <= 3; attempt++)
+                {
+                    try
+                    {
+                        _logger.LogInformation("Reconnection attempt {Attempt}/3...", attempt);
+                        await ConnectAsync(cancellationToken);
+
+                        // Re-authorize if we have credentials
+                        if (!string.IsNullOrEmpty(_config.ApiToken))
+                        {
+                            await AuthorizeAsync(cancellationToken);
+                        }
+
+                        reconnected = true;
+                        _logger.LogInformation("Reconnection successful");
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Reconnection attempt {Attempt}/3 failed", attempt);
+                        if (attempt < 3)
+                        {
+                            await Task.Delay(TimeSpan.FromSeconds(2 * attempt), cancellationToken);
+                        }
+                    }
+                }
+
+                if (!reconnected)
+                {
+                    throw new InvalidOperationException(
+                        "Failed to reconnect after 3 attempts. WebSocket remains unavailable.");
+                }
             }
 
             var json = JsonConvert.SerializeObject(request);
