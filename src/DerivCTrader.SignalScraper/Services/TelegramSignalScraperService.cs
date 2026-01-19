@@ -1,4 +1,5 @@
 ﻿using DerivCTrader.Application.Interfaces;
+using DerivCTrader.Application.Parsers;
 using DerivCTrader.Domain.Entities;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
@@ -16,9 +17,22 @@ public class TelegramSignalScraperService : BackgroundService
     private readonly IConfiguration _configuration;
     private readonly IEnumerable<ISignalParser> _parsers;
     private readonly ITradeRepository _repository;
+    private readonly IDashaTradeRepository? _dashaRepository;
+    private readonly CmflixParser? _cmflixParser;
+    private readonly IzintzikaDerivParser? _izintzikaDerivParser;
     private Client? _client1;
     private Client? _client2;
     private readonly Dictionary<long, string> _channelMappings;
+
+    // DashaTrade channel ID for selective martingale routing
+    private const string DASHA_TRADE_CHANNEL_ID = "-1001570351142";
+
+    // CMFLIX Gold Signals channel ID for scheduled signals
+    private const string CMFLIX_CHANNEL_ID = "-1001473818334";
+
+    // Reduce log noise: warn once per unknown channel, then downgrade repeats.
+    private readonly HashSet<string> _unknownChannelWarned = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _unknownChannelWarnedLock = new();
 
     private static readonly HttpClient Http = new();
     private static readonly SemaphoreSlim OcrLock = new(1, 1);
@@ -27,12 +41,18 @@ public class TelegramSignalScraperService : BackgroundService
         ILogger<TelegramSignalScraperService> logger,
         IConfiguration configuration,
         IEnumerable<ISignalParser> parsers,
-        ITradeRepository repository)
+        ITradeRepository repository,
+        IDashaTradeRepository? dashaRepository = null,
+        CmflixParser? cmflixParser = null,
+        IzintzikaDerivParser? izintzikaDerivParser = null)
     {
         _logger = logger;
         _configuration = configuration;
         _parsers = parsers;
         _repository = repository;
+        _dashaRepository = dashaRepository;
+        _cmflixParser = cmflixParser;
+        _izintzikaDerivParser = izintzikaDerivParser;
 
         // Build channel ID mappings
         _channelMappings = new Dictionary<long, string>();
@@ -73,9 +93,10 @@ public class TelegramSignalScraperService : BackgroundService
                 }
                 else
                 {
-                    // Other formats (-14xxx, -13xxx, -22xxx, etc.) → map by digits after -1
-                    // This handles: -1476865523, -1392143914, -22xxxxxxxxx, etc.
-                    var numericPart = channelValue.Substring(2); // Remove "-1"
+                    // Other formats: map by absolute numeric ID (strip leading '-')
+                    // Example: -1628868943 -> 1628868943
+                    // This matches WTelegram's PeerChannel.channel_id / PeerChat.chat_id values.
+                    var numericPart = channelValue.Substring(1);
                     if (long.TryParse(numericPart, out var channelId))
                     {
                         mappingKey = channelId;
@@ -302,28 +323,48 @@ public class TelegramSignalScraperService : BackgroundService
                 }
 
                 // Log the raw message details
-                _logger.LogInformation("📥 RAW MESSAGE | ChannelId: {ChannelId}", channelId);
-                Console.WriteLine($"📥 Channel: {channelId}");
+                _logger.LogInformation("📥 RAW MESSAGE | ChannelId: {ChannelId}, MessageId: {MessageId}", channelId, message.id);
+                Console.WriteLine($"📥 Channel: {channelId}, MessageId: {message.id}");
                 Console.WriteLine($"📝 FULL MESSAGE:\n{message.message}\n");
 
                 // Check if this is a monitored channel
+                // If mapping exists, use configured value. Otherwise try both common formats.
                 var providerChannelId = _channelMappings.ContainsKey(channelId)
                     ? _channelMappings[channelId]
-                    : $"-100{channelId}";
+                    : $"-{channelId}";
 
                 // Log the provider lookup
                 _logger.LogInformation("🔍 Looking up provider: {Provider} (Raw ID: {RawId})",
                     providerChannelId, channelId);
                 Console.WriteLine($"🔍 Looking for: {providerChannelId} (from raw: {channelId})");
 
-                var config = await _repository.GetProviderConfigAsync(providerChannelId);
+                // If not found under "-{id}" then also try "-100{id}" (supergroup format)
+                var config = await _repository.GetProviderConfigAsync(providerChannelId)
+                             ?? await _repository.GetProviderConfigAsync($"-100{channelId}");
                 if (config == null)
                 {
-                    _logger.LogWarning("❌ NOT A CONFIGURED CHANNEL: {Channel} | Raw ID: {RawId}",
-                        providerChannelId, channelId);
-                    Console.WriteLine($"❌ Channel {providerChannelId} not in database");
+                    var firstTime = false;
+                    lock (_unknownChannelWarnedLock)
+                    {
+                        firstTime = _unknownChannelWarned.Add(providerChannelId);
+                    }
+
+                    if (firstTime)
+                    {
+                        _logger.LogWarning("❌ NOT A CONFIGURED CHANNEL: {Channel} | Raw ID: {RawId}",
+                            providerChannelId, channelId);
+                        Console.WriteLine($"❌ Channel {providerChannelId} not in database");
+                    }
+                    else
+                    {
+                        _logger.LogDebug("Skipping unconfigured channel (repeat): {Channel} | Raw ID: {RawId}",
+                            providerChannelId, channelId);
+                    }
                     return;
                 }
+
+                // Ensure providerChannelId matches the DB row we found (important for parser routing)
+                providerChannelId = config.ProviderChannelId;
 
                 // Confirm config found
                 _logger.LogInformation("✅ FOUND CONFIG: {Provider}", config.ProviderName);
@@ -357,12 +398,88 @@ public class TelegramSignalScraperService : BackgroundService
                     }
                 }
 
+                // 🆕 CMFLIX BATCH SIGNALS - Handle before normal parsers
+                // CMFLIX sends batch scheduled signals that need special handling
+                if (_cmflixParser != null && _cmflixParser.CanParse(providerChannelId, messageText ?? ""))
+                {
+                    _logger.LogInformation("📅 CMFLIX batch signal detected, parsing scheduled signals");
+                    Console.WriteLine("📅 CMFLIX batch signal detected");
+
+                    var scheduledSignals = _cmflixParser.ParseBatch(messageText ?? "", message.id);
+
+                    if (scheduledSignals.Count > 0)
+                    {
+                        var savedCount = 0;
+                        foreach (var signal in scheduledSignals)
+                        {
+                            try
+                            {
+                                var signalId = await _repository.SaveParsedSignalAsync(signal);
+                                savedCount++;
+                                _logger.LogDebug("Saved CMFLIX signal: {Asset} {Direction} at {ScheduledTime:HH:mm} UTC",
+                                    signal.Asset, signal.Direction, signal.ScheduledAtUtc);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex, "Failed to save CMFLIX signal {Asset}", signal.Asset);
+                            }
+                        }
+
+                        _logger.LogInformation("💾 Saved {SavedCount}/{TotalCount} CMFLIX scheduled signals",
+                            savedCount, scheduledSignals.Count);
+                        Console.WriteLine($"💾 Saved {savedCount}/{scheduledSignals.Count} CMFLIX scheduled signals");
+                        return; // Done processing this message
+                    }
+                    else
+                    {
+                        _logger.LogWarning("CMFLIX parser matched but returned 0 signals");
+                    }
+                }
+
+                // 🆕 IZINTZIKADERIV BATCH SIGNALS - Handle before normal parsers
+                // IzintzikaDeriv sends multiple entry order signals per message
+                if (_izintzikaDerivParser != null && _izintzikaDerivParser.CanParse(providerChannelId, messageText ?? ""))
+                {
+                    _logger.LogInformation("📊 IzintzikaDeriv batch signal detected, parsing entry orders");
+                    Console.WriteLine("📊 IzintzikaDeriv batch signal detected");
+
+                    var entrySignals = _izintzikaDerivParser.ParseBatch(messageText ?? "", message.id);
+
+                    if (entrySignals.Count > 0)
+                    {
+                        var savedCount = 0;
+                        foreach (var signal in entrySignals)
+                        {
+                            try
+                            {
+                                var signalId = await _repository.SaveParsedSignalAsync(signal);
+                                savedCount++;
+                                _logger.LogDebug("Saved IzintzikaDeriv signal: {Asset} {Direction} @ {Entry}",
+                                    signal.Asset, signal.Direction, signal.EntryPrice);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex, "Failed to save IzintzikaDeriv signal {Asset}", signal.Asset);
+                            }
+                        }
+
+                        _logger.LogInformation("💾 Saved {SavedCount}/{TotalCount} IzintzikaDeriv entry signals",
+                            savedCount, entrySignals.Count);
+                        Console.WriteLine($"💾 Saved {savedCount}/{entrySignals.Count} IzintzikaDeriv entry signals");
+                        return; // Done processing this message
+                    }
+                    else
+                    {
+                        _logger.LogWarning("IzintzikaDeriv parser matched but returned 0 signals");
+                    }
+                }
+
                 // Find appropriate parser
                 _logger.LogInformation("🔎 Looking for parser for channel: {Channel}", providerChannelId);
                 Console.WriteLine($"🔎 Searching for parser for: {providerChannelId}");
 
-                var parser = _parsers.FirstOrDefault(p => p.CanParse(providerChannelId));
-                if (parser == null)
+                var candidateParsers = _parsers.Where(p => p.CanParse(providerChannelId)).ToList();
+                if (candidateParsers.Count == 0)
                 {
                     _logger.LogWarning("❌ No parser found for channel {Channel}", providerChannelId);
                     Console.WriteLine($"❌ No parser for {providerChannelId} (Have {_parsers.Count()} parsers total)");
@@ -375,38 +492,68 @@ public class TelegramSignalScraperService : BackgroundService
                     return;
                 }
 
-                // Log which parser matched
-                _logger.LogInformation("✅ PARSER FOUND: {Parser}", parser.GetType().Name);
-                Console.WriteLine($"✅ Using parser: {parser.GetType().Name}");
+                _logger.LogInformation("✅ Found {Count} candidate parser(s) for channel {Channel}", candidateParsers.Count, providerChannelId);
+                Console.WriteLine($"✅ Found {candidateParsers.Count} candidate parser(s)");
 
-                // Parse signal
-                _logger.LogInformation("🔨 Parsing signal...");
-                Console.WriteLine("🔨 Attempting to parse...");
+                ParsedSignal? parsedSignal = null;
+                ISignalParser? winningParser = null;
 
-                var parsedSignal = await parser.ParseAsync(messageText ?? "", providerChannelId, imageData);
+                foreach (var candidate in candidateParsers)
+                {
+                    _logger.LogInformation("🔨 Trying parser: {Parser}", candidate.GetType().Name);
+                    Console.WriteLine($"🔨 Trying parser: {candidate.GetType().Name}");
+
+                    parsedSignal = await candidate.ParseAsync(messageText ?? "", providerChannelId, imageData);
+                    if (parsedSignal != null)
+                    {
+                        winningParser = candidate;
+                        break;
+                    }
+                }
+
+                if (winningParser != null)
+                {
+                    _logger.LogInformation("✅ PARSER SUCCEEDED: {Parser}", winningParser.GetType().Name);
+                    Console.WriteLine($"✅ Parser succeeded: {winningParser.GetType().Name}");
+                }
 
                 if (parsedSignal != null)
                 {
-                    _logger.LogInformation("✅ Successfully parsed signal: {Asset} {Direction} @ {Entry} | TP: {TP} | SL: {SL}",
+                    // Capture the Telegram message ID for reply threading
+                    parsedSignal.TelegramMessageId = message.id;
+                    
+                    _logger.LogInformation("✅ Successfully parsed signal: {Asset} {Direction} @ {Entry} | TP: {TP} | SL: {SL} | TelegramMsgId: {MsgId}",
                         parsedSignal.Asset,
                         parsedSignal.Direction,
                         parsedSignal.EntryPrice,
                         parsedSignal.TakeProfit,
-                        parsedSignal.StopLoss);
+                        parsedSignal.StopLoss,
+                        parsedSignal.TelegramMessageId);
                     Console.WriteLine($"✅ PARSED SIGNAL:");
                     Console.WriteLine($"   Asset: {parsedSignal.Asset}");
                     Console.WriteLine($"   Direction: {parsedSignal.Direction}");
                     Console.WriteLine($"   Entry: {parsedSignal.EntryPrice}");
                     Console.WriteLine($"   Take Profit: {parsedSignal.TakeProfit}");
                     Console.WriteLine($"   Stop Loss: {parsedSignal.StopLoss}");
+                    Console.WriteLine($"   Telegram Message ID: {parsedSignal.TelegramMessageId}");
 
                     // 🆕 SAVE TO DATABASE
                     try
                     {
-                        var signalId = await _repository.SaveParsedSignalAsync(parsedSignal);
-                        
-                        _logger.LogInformation("💾 Signal saved to queue: SignalId={SignalId}", signalId);
-                        Console.WriteLine($"💾 SAVED TO QUEUE: Signal #{signalId}");
+                        // Check if this is a DashaTrade signal for selective martingale routing
+                        if (providerChannelId == DASHA_TRADE_CHANNEL_ID && _dashaRepository != null)
+                        {
+                            // Route to DashaPendingSignals for selective martingale processing
+                            await SaveDashaTradePendingSignalAsync(parsedSignal);
+                        }
+                        else
+                        {
+                            // Normal signal - save to ParsedSignalsQueue
+                            var signalId = await _repository.SaveParsedSignalAsync(parsedSignal);
+
+                            _logger.LogInformation("💾 Signal saved to queue: SignalId={SignalId}", signalId);
+                            Console.WriteLine($"💾 SAVED TO QUEUE: Signal #{signalId}");
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -508,6 +655,99 @@ public class TelegramSignalScraperService : BackgroundService
         {
             OcrLock.Release();
         }
+    }
+
+    /// <summary>
+    /// Saves a DashaTrade signal to DashaPendingSignals table for selective martingale processing.
+    /// Entry price will be filled in by DashaTradeExecutionService shortly after.
+    /// </summary>
+    private async Task SaveDashaTradePendingSignalAsync(ParsedSignal parsedSignal)
+    {
+        if (_dashaRepository == null)
+        {
+            _logger.LogWarning("[DashaTrade] Repository not available, cannot save pending signal");
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+
+        // Parse timeframe to get expiry minutes
+        var expiryMinutes = ParseTimeframeToMinutes(parsedSignal.Timeframe ?? "M15");
+
+        // Map direction: Buy -> UP, Sell -> DOWN
+        var direction = parsedSignal.Direction.ToString().ToUpperInvariant() switch
+        {
+            "BUY" => "UP",
+            "SELL" => "DOWN",
+            _ => parsedSignal.Direction.ToString().ToUpperInvariant()
+        };
+
+        // Check for duplicate
+        var exists = await _dashaRepository.SignalExistsAsync(
+            parsedSignal.Asset,
+            direction,
+            now,
+            parsedSignal.ProviderChannelId);
+
+        if (exists)
+        {
+            _logger.LogInformation("[DashaTrade] Duplicate signal detected, skipping: {Asset} {Direction}", parsedSignal.Asset, direction);
+            Console.WriteLine($"[DashaTrade] Duplicate signal, skipping");
+            return;
+        }
+
+        // Create pending signal (entry price = 0, will be filled by TradeExecutor)
+        var pendingSignal = new DashaPendingSignal
+        {
+            ProviderChannelId = parsedSignal.ProviderChannelId,
+            ProviderName = parsedSignal.ProviderName ?? "DashaTrade",
+            Asset = parsedSignal.Asset,
+            Direction = direction,
+            Timeframe = parsedSignal.Timeframe ?? "M15",
+            ExpiryMinutes = expiryMinutes,
+            EntryPrice = 0, // Will be filled by DashaTradeExecutionService
+            SignalReceivedAt = now,
+            ExpiryAt = now.AddMinutes(expiryMinutes),
+            Status = DashaPendingSignalStatus.AwaitingExpiry,
+            TelegramMessageId = parsedSignal.TelegramMessageId,
+            RawMessage = parsedSignal.RawMessage,
+            CreatedAt = now,
+            UpdatedAt = now
+        };
+
+        var signalId = await _dashaRepository.SavePendingSignalAsync(pendingSignal);
+
+        _logger.LogInformation(
+            "[DashaTrade] 🎯 Signal saved for selective martingale: Id={SignalId}, {Asset} {Direction} (expiry in {Expiry}min)",
+            signalId, parsedSignal.Asset, direction, expiryMinutes);
+        Console.WriteLine($"[DashaTrade] 🎯 SAVED: Signal #{signalId} - {parsedSignal.Asset} {direction} (expiry in {expiryMinutes}min)");
+    }
+
+    /// <summary>
+    /// Parses timeframe string to minutes for DashaTrade signals.
+    /// </summary>
+    private static int ParseTimeframeToMinutes(string timeframe)
+    {
+        if (string.IsNullOrEmpty(timeframe)) return 15;
+
+        var normalized = timeframe.ToUpperInvariant().Trim();
+
+        // Handle formats: M5, M15, H1, H4, D1
+        if (normalized.Length < 2) return 15;
+
+        var unit = normalized[0];
+        var numberStr = normalized.Substring(1);
+
+        if (!int.TryParse(numberStr, out var number))
+            return 15;
+
+        return unit switch
+        {
+            'M' => number,           // Minutes
+            'H' => number * 60,      // Hours
+            'D' => number * 1440,    // Days
+            _ => 15
+        };
     }
 
     public override void Dispose()

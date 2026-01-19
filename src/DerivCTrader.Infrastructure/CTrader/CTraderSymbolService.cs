@@ -1,3 +1,4 @@
+using DerivCTrader.Application.Interfaces;
 using DerivCTrader.Infrastructure.CTrader.Interfaces;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Configuration;
@@ -59,6 +60,7 @@ namespace DerivCTrader.Infrastructure.CTrader
         private readonly ICTraderClient _client;
         private readonly ILogger<CTraderSymbolService> _logger;
         private readonly IConfiguration _configuration;
+        private readonly ISymbolInfoCache? _symbolInfoCache;
         private readonly Dictionary<string, long> _symbolMap = new();
         private readonly Dictionary<string, long> _symbolMapIgnoreCase = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, long> _symbolMapNormalized = new(StringComparer.Ordinal);
@@ -96,6 +98,14 @@ namespace DerivCTrader.Infrastructure.CTrader
 
         public bool TryGetSymbolVolumeConstraints(long symbolId, out long minVolume, out long maxVolume, out long stepVolume)
         {
+            // Try DB cache first (preferred - fast, no API calls)
+            if (_symbolInfoCache?.IsInitialized == true &&
+                _symbolInfoCache.TryGetVolumeConstraints(symbolId, out minVolume, out maxVolume, out stepVolume))
+            {
+                return true;
+            }
+
+            // Fall back to in-memory dictionaries (populated from API)
             var okMin = _symbolIdToMinVolume.TryGetValue(symbolId, out minVolume);
             var okMax = _symbolIdToMaxVolume.TryGetValue(symbolId, out maxVolume);
             var okStep = _symbolIdToStepVolume.TryGetValue(symbolId, out stepVolume);
@@ -104,6 +114,13 @@ namespace DerivCTrader.Infrastructure.CTrader
 
         public async Task EnsureSymbolVolumeConstraintsAsync(long symbolId, CancellationToken cancellationToken = default)
         {
+            // If we have data in DB cache, no need to fetch from API
+            if (_symbolInfoCache?.IsInitialized == true &&
+                _symbolInfoCache.TryGetVolumeConstraints(symbolId, out _, out _, out _))
+            {
+                return;
+            }
+
             if (_symbolIdToMinVolume.ContainsKey(symbolId) && _symbolIdToMaxVolume.ContainsKey(symbolId) && _symbolIdToStepVolume.ContainsKey(symbolId))
                 return;
 
@@ -187,11 +204,16 @@ namespace DerivCTrader.Infrastructure.CTrader
             }
         }
 
-        public CTraderSymbolService(ICTraderClient client, ILogger<CTraderSymbolService> logger, IConfiguration configuration)
+        public CTraderSymbolService(
+            ICTraderClient client,
+            ILogger<CTraderSymbolService> logger,
+            IConfiguration configuration,
+            ISymbolInfoCache? symbolInfoCache = null)
         {
             _client = client;
             _logger = logger;
             _configuration = configuration;
+            _symbolInfoCache = symbolInfoCache;
         }
 
         /// <summary>

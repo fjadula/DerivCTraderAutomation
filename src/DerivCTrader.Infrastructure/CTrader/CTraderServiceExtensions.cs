@@ -1,4 +1,6 @@
-﻿using DerivCTrader.Infrastructure.CTrader.Interfaces;
+﻿using DerivCTrader.Application.Interfaces;
+using DerivCTrader.Infrastructure.Caching;
+using DerivCTrader.Infrastructure.CTrader.Interfaces;
 using DerivCTrader.Infrastructure.CTrader.Models;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -37,6 +39,7 @@ public static class CTraderServiceExtensions
 
         services.AddSingleton(cTraderConfig);
         services.AddSingleton<ICTraderClient, CTraderClient>();
+        services.AddSingleton<ISymbolInfoCache, SymbolInfoCache>();  // DB-backed symbol cache
         services.AddSingleton<ICTraderOrderManager, CTraderOrderManager>();
         services.AddSingleton<ICTraderSymbolService, CTraderSymbolService>();
         services.AddSingleton<ICTraderPriceMonitor, CTraderPriceMonitor>();

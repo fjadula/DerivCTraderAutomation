@@ -95,6 +95,38 @@ stages:
           }
 
     # -----------------------------
+    # Include Telegram Session File
+    # -----------------------------
+    - task: DownloadSecureFile@1
+      displayName: 'Download Telegram Session File'
+      name: TelegramSession
+      inputs:
+        secureFile: 'WTelegram.session'
+
+    - task: PowerShell@2
+      displayName: 'Copy Session File to Artifact'
+      inputs:
+        targetType: inline
+        script: |
+          $sessionSource = "$(TelegramSession.secureFilePath)"
+          $sessionDest = "$(Build.ArtifactStagingDirectory)\signalscraper\WTelegram.session"
+
+          Write-Host "Session file source: $sessionSource"
+          Write-Host "Session file destination: $sessionDest"
+
+          if (Test-Path $sessionSource) {
+            Copy-Item -Path $sessionSource -Destination $sessionDest -Force
+            Write-Host "✅ Session file copied to artifact: WTelegram.session" -ForegroundColor Green
+
+            # Verify the copy
+            $destFile = Get-Item $sessionDest
+            Write-Host "Session file size: $($destFile.Length) bytes"
+          } else {
+            Write-Warning "⚠️ Session file not found at: $sessionSource"
+            Write-Host "Deployment will continue - VPS backup will be used if available"
+          }
+
+    # -----------------------------
     # Publish TradeExecutor Service
     # -----------------------------
     - task: PowerShell@2

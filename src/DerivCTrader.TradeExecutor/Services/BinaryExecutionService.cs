@@ -125,6 +125,21 @@ public class BinaryExecutionService : BackgroundService
             signal.SignalId, signal.Asset, signal.Direction);
         Console.WriteLine($"🔨 Processing: {signal.Asset} {signal.Direction}");
 
+        // ⚠️ BOOM/CRASH EXCLUSION: These indices do NOT support binary options on Deriv
+        if (signal.Asset.Contains("Boom", StringComparison.OrdinalIgnoreCase) ||
+            signal.Asset.Contains("Crash", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning("⚠️ Skipping binary execution for {Asset} - Boom/Crash indices do not support binary options", 
+                signal.Asset);
+            Console.WriteLine($"⚠️ SKIPPED: {signal.Asset} - No binary support for Boom/Crash");
+            
+            // Mark signal as processed to prevent retry
+            await _repository.MarkSignalAsProcessedAsync(signal.SignalId);
+            
+            _logger.LogInformation("✅ Signal #{SignalId} marked as processed (Boom/Crash exclusion)", signal.SignalId);
+            return;
+        }
+
         // Calculate expiry
         int expiryMinutes = CalculateExpiry(signal);
 
@@ -190,14 +205,71 @@ public class BinaryExecutionService : BackgroundService
 
     private int CalculateExpiry(ParsedSignal signal)
     {
-        // Enforce minimum 30 minutes for current strategy requirements
+        // Check if expiry is specified in Timeframe field.
+        // Accept formats:
+        // - "5M" / "10m"
+        // - "5" (when DB column is INT and Dapper maps it back to string)
+        // - "5 Min" / "5 Minutes"
+        // Used by DerivPlus and other providers that specify expiry per signal
+        if (!string.IsNullOrWhiteSpace(signal.Timeframe))
+        {
+            var tf = signal.Timeframe.Trim();
+
+            // 1) Pure number => minutes
+            if (int.TryParse(tf, out var numericMinutes) && numericMinutes > 0)
+            {
+                _logger.LogInformation("Using signal-specified expiry from Timeframe (numeric): {Minutes} minutes", numericMinutes);
+                return numericMinutes;
+            }
+
+            // 2) Common minute formats
+            var timeframeMatch = System.Text.RegularExpressions.Regex.Match(
+                tf,
+                @"^(\d+)\s*(M|MIN|MINS|MINUTE|MINUTES)$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            if (timeframeMatch.Success && int.TryParse(timeframeMatch.Groups[1].Value, out var tfExpiry) && tfExpiry > 0)
+            {
+                _logger.LogInformation("Using signal-specified expiry from Timeframe: {Minutes} minutes", tfExpiry);
+                return tfExpiry;
+            }
+        }
+
+        // Provider-specific expiry settings
+        var providerExpiry = GetProviderExpiry(signal.ProviderName);
+        if (providerExpiry.HasValue)
+        {
+            _logger.LogInformation("Using provider-specific expiry for {Provider}: {Minutes} minutes",
+                signal.ProviderName, providerExpiry.Value);
+            return providerExpiry.Value;
+        }
+
+        // Asset-based defaults
         if (signal.Asset.Contains("VIX", StringComparison.OrdinalIgnoreCase) ||
             signal.Asset.Contains("Volatility", StringComparison.OrdinalIgnoreCase))
         {
             return 30;
         }
 
-        // Forex/Commodities: 30 minutes minimum
+        // Default: 30 minutes
         return 30;
+    }
+
+    /// <summary>
+    /// Provider-specific expiry settings (in minutes)
+    /// </summary>
+    private static int? GetProviderExpiry(string? providerName)
+    {
+        if (string.IsNullOrEmpty(providerName))
+            return null;
+
+        return providerName.ToUpperInvariant() switch
+        {
+            "PIPSMOVE" => 45,                    // 45 minutes
+            "FXTRADINGPROFESSOR" => 45,          // 45 minutes
+            "PERFECTFX" => 960,                  // 16 hours
+            "VIP KNIGHTS" => 240,                // 4 hours
+            _ => null
+        };
     }
 }

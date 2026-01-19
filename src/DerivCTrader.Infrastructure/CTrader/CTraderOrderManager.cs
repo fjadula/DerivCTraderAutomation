@@ -708,14 +708,86 @@ public class CTraderOrderManager : ICTraderOrderManager
         try
         {
             _logger.LogInformation("Canceling order {OrderId}", orderId);
-            // TODO: Implement ProtoOACancelOrderReq
-            await Task.CompletedTask;
-            return true;
+
+            if (!_client.IsConnected || !_client.IsAccountAuthenticated)
+            {
+                _logger.LogWarning("Cannot cancel order: cTrader client not connected/account-authenticated");
+                return false;
+            }
+
+            var cancelReq = new ProtoOACancelOrderReq
+            {
+                CtidTraderAccountId = GetAccountId(),
+                OrderId = orderId
+            };
+
+            await _client.SendMessageAsync(cancelReq, PayloadType.ProtoOaCancelOrderReq);
+
+            // Wait for execution event confirming cancellation
+            var (executionEvent, errorPayload) = await WaitForOrderCancelOutcomeAsync(orderId, TimeSpan.FromSeconds(10));
+
+            if (errorPayload != null)
+            {
+                _logger.LogError("Failed to cancel order {OrderId}: {Error}", orderId, FormatErrorPayload(errorPayload));
+                return false;
+            }
+
+            if (executionEvent != null && executionEvent.ExecutionType == ProtoOAExecutionType.OrderCancelled)
+            {
+                _logger.LogInformation("Successfully cancelled order {OrderId}", orderId);
+                return true;
+            }
+
+            // No explicit error and no cancel event - may have timed out or already been filled
+            _logger.LogWarning("Cancel order {OrderId}: no cancellation confirmation received (order may have been filled or already cancelled)", orderId);
+            return true; // Treat as success if no error
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to cancel order {OrderId}", orderId);
             return false;
+        }
+    }
+
+    private async Task<(ProtoOAExecutionEvent? ExecutionEvent, byte[]? ErrorPayload)> WaitForOrderCancelOutcomeAsync(long orderId, TimeSpan timeout)
+    {
+        var tcs = new TaskCompletionSource<(ProtoOAExecutionEvent?, byte[]?)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cts = new CancellationTokenSource(timeout);
+
+        void Handler(object? sender, CTraderMessage msg)
+        {
+            try
+            {
+                // Check for error
+                if (msg.PayloadType == (int)PayloadType.ProtoOaErrorRes)
+                {
+                    tcs.TrySetResult((null, msg.Payload));
+                    return;
+                }
+
+                // Check for execution event
+                if (msg.PayloadType == (int)PayloadType.ProtoOaExecutionEvent)
+                {
+                    var exec = ProtoOAExecutionEvent.Parser.ParseFrom(msg.Payload);
+                    if (exec.Order?.OrderId == orderId && exec.ExecutionType == ProtoOAExecutionType.OrderCancelled)
+                    {
+                        tcs.TrySetResult((exec, null));
+                    }
+                }
+            }
+            catch { /* Ignore parse errors */ }
+        }
+
+        _client.MessageReceived += Handler;
+        cts.Token.Register(() => tcs.TrySetResult((null, null)));
+
+        try
+        {
+            return await tcs.Task;
+        }
+        finally
+        {
+            _client.MessageReceived -= Handler;
         }
     }
 
@@ -836,15 +908,92 @@ public class CTraderOrderManager : ICTraderOrderManager
     {
         try
         {
-            _logger.LogInformation("Closing position {PositionId}", positionId);
-            // TODO: Implement ProtoOAClosePositionReq
-            await Task.CompletedTask;
+            _logger.LogInformation("Closing position {PositionId} (volume={Volume})", positionId, volume);
+
+            if (!_client.IsConnected || !_client.IsAccountAuthenticated)
+            {
+                _logger.LogWarning("Cannot close position: cTrader client not connected/account-authenticated");
+                return false;
+            }
+
+            // Volume = 0 means full close; otherwise partial close
+            var closeReq = new ProtoOAClosePositionReq
+            {
+                CtidTraderAccountId = GetAccountId(),
+                PositionId = positionId,
+                Volume = volume > 0 ? (long)(volume * 100) : 0 // Convert to centiunits, 0 = full close
+            };
+
+            await _client.SendMessageAsync(closeReq, PayloadType.ProtoOaClosePositionReq);
+
+            // Wait for execution event confirming position closed
+            var (executionEvent, errorPayload) = await WaitForPositionCloseOutcomeAsync(positionId, TimeSpan.FromSeconds(10));
+
+            if (errorPayload != null)
+            {
+                _logger.LogError("Failed to close position {PositionId}: {Error}", positionId, FormatErrorPayload(errorPayload));
+                return false;
+            }
+
+            if (executionEvent != null)
+            {
+                _logger.LogInformation("Successfully closed position {PositionId}", positionId);
+                return true;
+            }
+
+            // No explicit error - treat as success (position may have been closed already)
+            _logger.LogWarning("Close position {PositionId}: no close confirmation received (position may have been closed already)", positionId);
             return true;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to close position {PositionId}", positionId);
             return false;
+        }
+    }
+
+    private async Task<(ProtoOAExecutionEvent? ExecutionEvent, byte[]? ErrorPayload)> WaitForPositionCloseOutcomeAsync(long positionId, TimeSpan timeout)
+    {
+        var tcs = new TaskCompletionSource<(ProtoOAExecutionEvent?, byte[]?)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cts = new CancellationTokenSource(timeout);
+
+        void Handler(object? sender, CTraderMessage msg)
+        {
+            try
+            {
+                // Check for error
+                if (msg.PayloadType == (int)PayloadType.ProtoOaErrorRes)
+                {
+                    tcs.TrySetResult((null, msg.Payload));
+                    return;
+                }
+
+                // Check for execution event indicating position closed
+                if (msg.PayloadType == (int)PayloadType.ProtoOaExecutionEvent)
+                {
+                    var exec = ProtoOAExecutionEvent.Parser.ParseFrom(msg.Payload);
+                    // Position close triggers an execution event with the position
+                    if (exec.Position?.PositionId == positionId &&
+                        (exec.ExecutionType == ProtoOAExecutionType.OrderFilled ||
+                         exec.ExecutionType == ProtoOAExecutionType.OrderPartialFill))
+                    {
+                        tcs.TrySetResult((exec, null));
+                    }
+                }
+            }
+            catch { /* Ignore parse errors */ }
+        }
+
+        _client.MessageReceived += Handler;
+        cts.Token.Register(() => tcs.TrySetResult((null, null)));
+
+        try
+        {
+            return await tcs.Task;
+        }
+        finally
+        {
+            _client.MessageReceived -= Handler;
         }
     }
 
@@ -1226,8 +1375,8 @@ public class CTraderOrderManager : ICTraderOrderManager
         }
     fallback:
         // Default: use configured lot size (forex/other)
-        // cTrader wire units: lots * 100000 (no extra *100)
-        var requested = (long)Math.Round(_defaultLotSize * 100_000d, MidpointRounding.AwayFromZero);
+        // cTrader wire units: lots * 100000 * 100 (volume in hundredths)
+        var requested = (long)Math.Round(_defaultLotSize * 100_000d * 100d, MidpointRounding.AwayFromZero);
         if (requested <= 0)
             requested = 1;
 

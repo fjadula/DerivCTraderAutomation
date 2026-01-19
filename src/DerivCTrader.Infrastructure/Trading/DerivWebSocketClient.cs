@@ -10,6 +10,20 @@ namespace DerivCTrader.Infrastructure.Trading;
 
 public class DerivWebSocketClient : IDerivClient, DerivCTrader.Infrastructure.Deriv.IDerivTickProvider, IDisposable
 {
+    // ===== RESILIENCE CONFIGURATION =====
+    private const int MAX_RECONNECT_ATTEMPTS = 5;
+    private const int STABILITY_RESET_MINUTES = 30;
+    private const int HEARTBEAT_INTERVAL_SECONDS = 30;
+
+    // Reconnection tracking
+    private int _reconnectAttempts = 0;
+    private DateTime? _lastSuccessfulConnection;
+    private readonly object _reconnectLock = new();
+
+    // Heartbeat
+    private Timer? _heartbeatTimer;
+    private DateTime _lastHeartbeatResponse = DateTime.UtcNow;
+
     // Tick subscription support for price probe
     public event EventHandler<DerivCTrader.Infrastructure.Deriv.DerivTickEventArgs>? TickReceived;
     private readonly Dictionary<string, string> _activeTickSubscriptions = new(); // symbol -> subscriptionId
@@ -66,20 +80,26 @@ public class DerivWebSocketClient : IDerivClient, DerivCTrader.Infrastructure.De
 
         try
         {
+            // Check if we should reset reconnect counter (30 minutes of stability)
+            CheckAndResetReconnectCounter();
+
             _client = new WebsocketClient(new Uri(_wsUrl));
-            
+
             _client.ReconnectTimeout = TimeSpan.FromSeconds(30);
             _client.ErrorReconnectTimeout = TimeSpan.FromSeconds(60);
-            
+
             _client.ReconnectionHappened.Subscribe(info =>
             {
                 _logger.LogInformation("Deriv WebSocket reconnection: {Type}", info.Type);
+                HandleReconnection(info.Type);
             });
 
             _client.DisconnectionHappened.Subscribe(info =>
             {
                 _logger.LogWarning("Deriv WebSocket disconnected: {Type}", info.Type);
                 _isConnected = false;
+                _isAuthorized = false;
+                StopHeartbeat();
             });
 
             await _client.Start();
@@ -90,6 +110,14 @@ public class DerivWebSocketClient : IDerivClient, DerivCTrader.Infrastructure.De
                 try
                 {
                     var response = JObject.Parse(msg.Text ?? "{}");
+
+                    // Handle ping/pong responses for heartbeat
+                    if (response["ping"] != null || response["pong"] != null)
+                    {
+                        _lastHeartbeatResponse = DateTime.UtcNow;
+                        return;
+                    }
+
                     if (response["tick"] != null)
                     {
                         var tick = response["tick"];
@@ -113,13 +141,132 @@ public class DerivWebSocketClient : IDerivClient, DerivCTrader.Infrastructure.De
             await AuthorizeAsync();
 
             _isConnected = true;
-            _logger.LogInformation("Connected to Deriv WebSocket API");
+            _lastSuccessfulConnection = DateTime.UtcNow;
+            _reconnectAttempts = 0; // Reset on successful connection
+            _logger.LogInformation("Connected to Deriv WebSocket API (reconnect counter reset)");
+
+            // Start heartbeat to keep connection alive
+            StartHeartbeat();
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to connect to Deriv WebSocket");
+            HandleConnectionFailure();
             throw;
         }
+    }
+
+    /// <summary>
+    /// Handle reconnection events - track attempts and trigger restart if needed
+    /// </summary>
+    private void HandleReconnection(ReconnectionType type)
+    {
+        if (type == ReconnectionType.Error || type == ReconnectionType.Lost)
+        {
+            lock (_reconnectLock)
+            {
+                _reconnectAttempts++;
+                _logger.LogWarning("Deriv reconnection attempt {Attempt}/{Max}", _reconnectAttempts, MAX_RECONNECT_ATTEMPTS);
+
+                if (_reconnectAttempts >= MAX_RECONNECT_ATTEMPTS)
+                {
+                    _logger.LogCritical("Max reconnection attempts ({Max}) reached. Triggering service restart...", MAX_RECONNECT_ATTEMPTS);
+                    TriggerServiceRestart();
+                }
+            }
+        }
+        else if (type == ReconnectionType.Initial)
+        {
+            // Successful reconnection - reset counter
+            _reconnectAttempts = 0;
+            _lastSuccessfulConnection = DateTime.UtcNow;
+            _logger.LogInformation("Deriv WebSocket reconnected successfully, counter reset");
+        }
+    }
+
+    /// <summary>
+    /// Handle connection failure - increment counter and check for restart
+    /// </summary>
+    private void HandleConnectionFailure()
+    {
+        lock (_reconnectLock)
+        {
+            _reconnectAttempts++;
+            _logger.LogError("Deriv connection failed. Attempt {Attempt}/{Max}", _reconnectAttempts, MAX_RECONNECT_ATTEMPTS);
+
+            if (_reconnectAttempts >= MAX_RECONNECT_ATTEMPTS)
+            {
+                _logger.LogCritical("Max connection attempts ({Max}) reached. Triggering service restart...", MAX_RECONNECT_ATTEMPTS);
+                TriggerServiceRestart();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Check if 30 minutes of stability has passed and reset counter
+    /// </summary>
+    private void CheckAndResetReconnectCounter()
+    {
+        if (_lastSuccessfulConnection.HasValue)
+        {
+            var timeSinceLastSuccess = DateTime.UtcNow - _lastSuccessfulConnection.Value;
+            if (timeSinceLastSuccess.TotalMinutes >= STABILITY_RESET_MINUTES && _reconnectAttempts > 0)
+            {
+                _logger.LogInformation("Connection stable for {Minutes} minutes. Resetting reconnect counter from {Count} to 0",
+                    STABILITY_RESET_MINUTES, _reconnectAttempts);
+                _reconnectAttempts = 0;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Start heartbeat timer to keep connection alive
+    /// </summary>
+    private void StartHeartbeat()
+    {
+        StopHeartbeat(); // Ensure no duplicate timers
+
+        _heartbeatTimer = new Timer(async _ =>
+        {
+            try
+            {
+                if (_client != null && _isConnected)
+                {
+                    var pingRequest = new { ping = 1 };
+                    _client.Send(JsonConvert.SerializeObject(pingRequest));
+                    _logger.LogDebug("Deriv heartbeat ping sent");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Heartbeat ping failed");
+            }
+        }, null, TimeSpan.FromSeconds(HEARTBEAT_INTERVAL_SECONDS), TimeSpan.FromSeconds(HEARTBEAT_INTERVAL_SECONDS));
+
+        _logger.LogInformation("Deriv heartbeat started (every {Seconds} seconds)", HEARTBEAT_INTERVAL_SECONDS);
+    }
+
+    /// <summary>
+    /// Stop heartbeat timer
+    /// </summary>
+    private void StopHeartbeat()
+    {
+        _heartbeatTimer?.Dispose();
+        _heartbeatTimer = null;
+    }
+
+    /// <summary>
+    /// Trigger service restart via Environment.Exit
+    /// </summary>
+    private void TriggerServiceRestart()
+    {
+        _logger.LogCritical("===== DERIV CONNECTION FAILURE - INITIATING SERVICE RESTART =====");
+
+        // Give logs time to flush
+        Task.Delay(1000).Wait();
+
+        // Exit with code 1 to signal restart needed
+        Environment.Exit(1);
     }
 
     private async Task AuthorizeAsync()
@@ -293,10 +440,12 @@ public class DerivWebSocketClient : IDerivClient, DerivCTrader.Infrastructure.De
     {
         if (_client != null)
         {
+            StopHeartbeat();
             _tickMessageSubscription?.Dispose();
             _tickMessageSubscription = null;
             await _client.Stop(WebSocketCloseStatus.NormalClosure, "Closing connection");
             _isConnected = false;
+            _isAuthorized = false;
             _logger.LogInformation("Disconnected from Deriv WebSocket");
         }
     }
@@ -350,8 +499,96 @@ public class DerivWebSocketClient : IDerivClient, DerivCTrader.Infrastructure.De
         return 0m;
     }
 
+    public async Task<decimal?> GetSpotPriceAsync(string symbol, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (!_isConnected)
+            {
+                await ConnectAsync(cancellationToken);
+            }
+
+            var derivSymbol = ConvertToDerivSymbol(symbol);
+
+            var request = new
+            {
+                ticks_history = derivSymbol,
+                end = "latest",
+                count = 1,
+                style = "ticks"
+            };
+
+            var response = await SendRequestAsync(request);
+
+            if (response?["error"] != null)
+            {
+                _logger.LogWarning("Failed to get spot price for {Symbol}: {Error}",
+                    symbol, response["error"]);
+                return null;
+            }
+
+            var prices = response?["history"]?["prices"]?.ToObject<decimal[]>();
+            if (prices != null && prices.Length > 0)
+            {
+                return prices[0];
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting spot price for {Symbol}", symbol);
+            return null;
+        }
+    }
+
+    public async Task<decimal?> GetHistoricalPriceAsync(string symbol, DateTime timestamp, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (!_isConnected)
+            {
+                await ConnectAsync(cancellationToken);
+            }
+
+            var derivSymbol = ConvertToDerivSymbol(symbol);
+            var epochTime = ((DateTimeOffset)timestamp).ToUnixTimeSeconds();
+
+            var request = new
+            {
+                ticks_history = derivSymbol,
+                end = epochTime,
+                count = 1,
+                style = "ticks"
+            };
+
+            var response = await SendRequestAsync(request);
+
+            if (response?["error"] != null)
+            {
+                _logger.LogWarning("Failed to get historical price for {Symbol} at {Timestamp}: {Error}",
+                    symbol, timestamp, response["error"]);
+                return null;
+            }
+
+            var prices = response?["history"]?["prices"]?.ToObject<decimal[]>();
+            if (prices != null && prices.Length > 0)
+            {
+                return prices[0];
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting historical price for {Symbol} at {Timestamp}", symbol, timestamp);
+            return null;
+        }
+    }
+
     public void Dispose()
     {
+        StopHeartbeat();
         _tickMessageSubscription?.Dispose();
         _client?.Dispose();
     }

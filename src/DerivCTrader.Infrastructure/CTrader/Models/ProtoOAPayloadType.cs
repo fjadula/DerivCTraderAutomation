@@ -15,6 +15,7 @@ public enum ProtoOAPayloadType
     ProtoOaNewOrderReq = 2106, // CORRECTED from 2126 (which was ProtoOaExecutionEvent)
     ProtoOaNewOrderRes = 2107,  // CORRECTED (previously was wrong sequence)
     ProtoOaCancelOrderReq = 2108, // CORRECTED
+    ProtoOaClosePositionReq = 2111,
     ProtoOaExecutionEvent = 2126, // CORRECTED (was previously assigned to NewOrderReq)
     // Market data subscriptions
     ProtoOaSubscribeSpotsReq = 2120,

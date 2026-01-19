@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Collections.Concurrent;
 using DerivCTrader.Application.Interfaces;
 using DerivCTrader.Domain.Entities;
 using DerivCTrader.Infrastructure.Deriv;
@@ -25,6 +26,7 @@ namespace DerivCTrader.TradeExecutor.Services;
 /// </summary>
 public class DerivBinaryExecutorService : BackgroundService
 {
+
     private readonly ILogger<DerivBinaryExecutorService> _logger;
     private readonly ITradeRepository _repository;
     private readonly IDerivClient _derivClient;
@@ -32,6 +34,10 @@ public class DerivBinaryExecutorService : BackgroundService
     private readonly decimal _defaultStake;
     private readonly int _pollIntervalSeconds;
     private readonly System.Threading.SemaphoreSlim _wakeSemaphore = new(0, 1);
+
+    // Synthetic-safe execution: queue and semaphore
+    private readonly ConcurrentQueue<TradeExecutionQueue> _syntheticQueue = new();
+    private readonly SemaphoreSlim _syntheticSemaphore = new(1, 1);
 
     // Expose a method for external event to trigger processing
     public void WakeUp() => _wakeSemaphore.Release();
@@ -60,8 +66,8 @@ public class DerivBinaryExecutorService : BackgroundService
         Console.WriteLine("  Deriv Binary Executor (Queue Mode)");
         Console.WriteLine("========================================");
         Console.WriteLine($"💰 Default Stake: ${_defaultStake}");
-        Console.WriteLine($"📊 Poll Interval: {_pollIntervalSeconds}s");
-        Console.WriteLine("🔍 Monitoring TradeExecutionQueue for cTrader executions...");
+        Console.WriteLine($"📊 Fallback Poll: {_pollIntervalSeconds}s (notification-driven)");
+        Console.WriteLine("🔔 Waiting for SQL notifications from TradeExecutionQueue...");
         Console.WriteLine();
 
         // Connect and authorize with Deriv (with retry)
@@ -119,19 +125,40 @@ public class DerivBinaryExecutorService : BackgroundService
             return;
         }
 
+        // Process any pending entries on startup (in case queue has items from before service started)
+        try
+        {
+            _logger.LogInformation("[STARTUP] Processing any pending queue entries from before service start");
+            await ProcessTradeExecutionQueueAsync(stoppingToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error processing startup queue - will retry on next notification");
+        }
+
+        // Main loop: wait for notification FIRST, then process
+        // This is more efficient than polling every N seconds
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                var nowStart = DateTime.UtcNow.ToString("O");
-                _logger.LogInformation("[TIMING] {Now} DerivBinaryExecutorService: Starting ProcessTradeExecutionQueueAsync", nowStart);
-                await ProcessTradeExecutionQueueAsync(stoppingToken);
-
-                // Wait for either a wake-up event or poll interval
+                // Wait for either a wake-up notification or poll interval (fallback for reliability)
+                _logger.LogDebug("[WAIT] Waiting for SQL notification or {PollInterval}s timeout...", _pollIntervalSeconds);
                 var delayTask = Task.Delay(TimeSpan.FromSeconds(_pollIntervalSeconds), stoppingToken);
                 var wakeTask = _wakeSemaphore.WaitAsync(stoppingToken);
                 var completed = await Task.WhenAny(delayTask, wakeTask);
-                // If wakeTask completes, just loop and process immediately
+
+                if (completed == wakeTask)
+                {
+                    _logger.LogInformation("[WAKE] Received notification - processing queue immediately");
+                }
+                else
+                {
+                    _logger.LogDebug("[POLL] Fallback poll interval reached - checking queue");
+                }
+
+                // Now process the queue
+                await ProcessTradeExecutionQueueAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -166,7 +193,22 @@ public class DerivBinaryExecutorService : BackgroundService
         _logger.LogInformation("📋 Found {Count} pending cTrader executions in queue", queueEntries.Count);
         Console.WriteLine($"📋 Processing {queueEntries.Count} cTrader execution(s) from queue...");
 
-        foreach (var queueEntry in queueEntries)
+        // Partition: synthetics (volatility indices) vs. others
+        var normalEntries = new List<TradeExecutionQueue>();
+        foreach (var entry in queueEntries)
+        {
+            if (IsSyntheticAsset(entry.Asset))
+            {
+                _syntheticQueue.Enqueue(entry);
+            }
+            else
+            {
+                normalEntries.Add(entry);
+            }
+        }
+
+        // Process normal entries immediately (parallel allowed)
+        foreach (var queueEntry in normalEntries)
         {
             try
             {
@@ -176,14 +218,36 @@ public class DerivBinaryExecutorService : BackgroundService
             {
                 _logger.LogError(ex, "Failed to process queue entry {QueueId}", queueEntry.QueueId);
                 Console.WriteLine($"❌ Failed queue entry #{queueEntry.QueueId}: {ex.Message}");
-                
-                // Don't delete on failure - retry next poll
-                // Consider adding retry count/timestamp logic if needed
+            }
+        }
+
+        // Process synthetics serially (one at a time)
+        if (!_syntheticQueue.IsEmpty)
+        {
+            await _syntheticSemaphore.WaitAsync(cancellationToken);
+            try
+            {
+                while (_syntheticQueue.TryDequeue(out var syntheticEntry))
+                {
+                    try
+                    {
+                        await ProcessQueueEntryAsync(syntheticEntry, cancellationToken, isSynthetic:true);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "[SYNTHETIC] Failed to process queue entry {QueueId}", syntheticEntry.QueueId);
+                        Console.WriteLine($"❌ [SYNTHETIC] Failed queue entry #{syntheticEntry.QueueId}: {ex.Message}");
+                    }
+                }
+            }
+            finally
+            {
+                _syntheticSemaphore.Release();
             }
         }
     }
 
-    private async Task ProcessQueueEntryAsync(TradeExecutionQueue queueEntry, CancellationToken cancellationToken)
+    private async Task ProcessQueueEntryAsync(TradeExecutionQueue queueEntry, CancellationToken cancellationToken, bool isSynthetic = false)
     {
         var now = DateTime.UtcNow.ToString("O");
         _logger.LogInformation("[TIMING] {Now} Processing queue entry #{QueueId}: {Asset} {Direction} (cTrader OrderId: {OrderId})",
@@ -192,9 +256,11 @@ public class DerivBinaryExecutorService : BackgroundService
         Console.WriteLine($"   cTrader OrderId: {queueEntry.CTraderOrderId}");
         Console.WriteLine($"   Strategy: {queueEntry.StrategyName}");
 
-        // Calculate expiry based on asset type
-        int expiryMinutes = _expiryCalculator.CalculateExpiry("forex", queueEntry.Asset ?? "");
-        _logger.LogInformation("📅 Calculated expiry: {Expiry} minutes for {Asset}", expiryMinutes, queueEntry.Asset);
+        // Calculate expiry - provider-specific first, then fallback to asset-based
+        int expiryMinutes = GetProviderExpiry(queueEntry.StrategyName)
+            ?? _expiryCalculator.CalculateExpiry("forex", queueEntry.Asset ?? "");
+        _logger.LogInformation("📅 Calculated expiry: {Expiry} minutes for {Asset} (Provider: {Provider})",
+            expiryMinutes, queueEntry.Asset, queueEntry.StrategyName ?? "default");
         Console.WriteLine($"   📅 Expiry: {expiryMinutes} minutes");
 
         // Map direction: Buy → CALL, Sell → PUT
@@ -207,18 +273,61 @@ public class DerivBinaryExecutorService : BackgroundService
             queueEntry.Asset, derivDirection, expiryMinutes, _defaultStake);
         Console.WriteLine($"   💳 Executing Deriv binary: ${_defaultStake} stake...");
 
-        var result = await _derivClient.PlaceBinaryOptionAsync(
-            queueEntry.Asset ?? "",
-            derivDirection,
-            _defaultStake,
-            expiryMinutes,
-            cancellationToken);
-
-        if (!result.Success)
+        DerivTradeResult result = null;
+        int maxRetries = isSynthetic ? 3 : 1;
+        int attempt = 0;
+        Exception lastEx = null;
+        while (attempt < maxRetries)
         {
-            _logger.LogError("❌ Deriv execution failed: {Error}", result.ErrorMessage);
-            Console.WriteLine($"   ❌ Deriv execution FAILED: {result.ErrorMessage}");
-            throw new Exception($"Deriv execution failed: {result.ErrorMessage}");
+            attempt++;
+            try
+            {
+                result = await _derivClient.PlaceBinaryOptionAsync(
+                    queueEntry.Asset ?? "",
+                    derivDirection,
+                    _defaultStake,
+                    expiryMinutes,
+                    cancellationToken);
+                if (result.Success)
+                    break;
+            }
+            catch (Exception ex)
+            {
+                lastEx = ex;
+            }
+            if (attempt < maxRetries)
+            {
+                _logger.LogWarning("[SYNTHETIC] Attempt {Attempt}/{Max} failed for asset {Asset}. Retrying...", attempt, maxRetries, queueEntry.Asset);
+                await Task.Delay(1000, cancellationToken);
+            }
+        }
+
+        // Fallback: for synthetics, if still failed, try market order (no expiry override, just log)
+        if (isSynthetic && (result == null || !result.Success))
+        {
+            _logger.LogWarning("[SYNTHETIC] All retries failed for asset {Asset}. Attempting fallback market order...", queueEntry.Asset);
+            // Optionally, you could adjust expiry or stake here for fallback
+            try
+            {
+                result = await _derivClient.PlaceBinaryOptionAsync(
+                    queueEntry.Asset ?? "",
+                    derivDirection,
+                    _defaultStake,
+                    expiryMinutes,
+                    cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                lastEx = ex;
+            }
+        }
+
+
+        if (result == null || !result.Success)
+        {
+            _logger.LogError("❌ Deriv execution failed: {Error}", result?.ErrorMessage ?? lastEx?.Message);
+            Console.WriteLine($"   ❌ Deriv execution FAILED: {result?.ErrorMessage ?? lastEx?.Message}");
+            throw new Exception($"Deriv execution failed: {result?.ErrorMessage ?? lastEx?.Message}");
         }
 
         var nowOrder = DateTime.UtcNow.ToString("O");
@@ -237,6 +346,17 @@ public class DerivBinaryExecutorService : BackgroundService
         Console.WriteLine();
     }
 
+    // Helper: Detect if asset is a synthetic/volatility index
+    private bool IsSyntheticAsset(string asset)
+    {
+        if (string.IsNullOrWhiteSpace(asset))
+            return false;
+        // Use expiry calculator's logic for volatility indices
+        return asset.Contains("Volatility", StringComparison.OrdinalIgnoreCase)
+            || asset.Contains("VIX", StringComparison.OrdinalIgnoreCase)
+            || asset.Contains("HZ", StringComparison.OrdinalIgnoreCase);
+    }
+
     private string MapDirection(string direction)
     {
         // Handle both cTrader directions (Buy/Sell) and pure binary directions (CALL/PUT)
@@ -249,6 +369,25 @@ public class DerivBinaryExecutorService : BackgroundService
             "CALL" => "CALL",   // Already in Deriv format (from pure binary signals)
             "PUT" => "PUT",     // Already in Deriv format (from pure binary signals)
             _ => throw new ArgumentException($"Unknown direction: {direction}")
+        };
+    }
+
+    /// <summary>
+    /// Provider-specific expiry settings (in minutes)
+    /// </summary>
+    private static int? GetProviderExpiry(string? providerName)
+    {
+        if (string.IsNullOrEmpty(providerName))
+            return null;
+
+        return providerName.ToUpperInvariant() switch
+        {
+            "PIPSMOVE" => 45,                    // 45 minutes
+            "FXTRADINGPROFESSOR" => 45,          // 45 minutes
+            "PERFECTFX" => 960,                  // 16 hours
+            "VIP KNIGHTS" => 240,                // 4 hours
+            "AFXGOLD" => 40,                     // 40 minutes
+            _ => null
         };
     }
 }

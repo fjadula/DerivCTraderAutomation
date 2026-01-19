@@ -1,3 +1,4 @@
+using DerivCTrader.Application.Interfaces;
 using DerivCTrader.Infrastructure.CTrader.Interfaces;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
@@ -14,6 +15,7 @@ public class CTraderSymbolInitializerService : BackgroundService
     private readonly ILogger<CTraderSymbolInitializerService> _logger;
     private readonly ICTraderClient _client;
     private readonly ICTraderSymbolService _symbolService;
+    private readonly ISymbolInfoCache _symbolInfoCache;
     private readonly IHostApplicationLifetime _lifetime;
     private readonly IConfiguration _configuration;
 
@@ -21,12 +23,14 @@ public class CTraderSymbolInitializerService : BackgroundService
         ILogger<CTraderSymbolInitializerService> logger,
         ICTraderClient client,
         ICTraderSymbolService symbolService,
+        ISymbolInfoCache symbolInfoCache,
         IHostApplicationLifetime lifetime,
         IConfiguration configuration)
     {
         _logger = logger;
         _client = client;
         _symbolService = symbolService;
+        _symbolInfoCache = symbolInfoCache;
         _lifetime = lifetime;
         _configuration = configuration;
     }
@@ -39,6 +43,21 @@ public class CTraderSymbolInitializerService : BackgroundService
             Console.WriteLine("\n========================================");
             Console.WriteLine("  cTrader Symbol Initializer");
             Console.WriteLine("========================================");
+
+            // Step 0: Load SymbolInfo from database (fast, no API calls)
+            Console.WriteLine("📦 Loading SymbolInfo cache from database...");
+            try
+            {
+                await _symbolInfoCache.InitializeAsync();
+                Console.WriteLine($"✅ SymbolInfo cache loaded: {_symbolInfoCache.Count} symbols");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to load SymbolInfo cache - will use API fallback");
+                Console.WriteLine($"⚠️  SymbolInfo cache failed: {ex.Message}");
+                Console.WriteLine("⚠️  Will use cTrader API for volume constraints");
+            }
+
             Console.WriteLine("🔗 Connecting to cTrader...\n");
 
             // Step 1: Connect to cTrader

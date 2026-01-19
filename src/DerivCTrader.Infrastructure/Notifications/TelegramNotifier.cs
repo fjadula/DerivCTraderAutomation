@@ -24,6 +24,21 @@ public sealed class TelegramNotifier : ITelegramNotifier
 
     public async Task SendTradeMessageAsync(string message, CancellationToken cancellationToken = default)
     {
+        await SendTradeMessageInternalAsync(message, replyToMessageId: null, cancellationToken);
+    }
+
+    public async Task<int?> SendTradeMessageWithIdAsync(string message, CancellationToken cancellationToken = default)
+    {
+        return await SendTradeMessageInternalAsync(message, replyToMessageId: null, cancellationToken);
+    }
+
+    public async Task<int?> SendTradeMessageAsync(string message, int replyToMessageId, CancellationToken cancellationToken = default)
+    {
+        return await SendTradeMessageInternalAsync(message, replyToMessageId, cancellationToken);
+    }
+
+    private async Task<int?> SendTradeMessageInternalAsync(string message, int? replyToMessageId, CancellationToken cancellationToken)
+    {
         try
         {
             var token = _configuration.GetSection("Telegram")["SignalToken"]
@@ -31,7 +46,7 @@ public sealed class TelegramNotifier : ITelegramNotifier
             if (string.IsNullOrWhiteSpace(token))
             {
                 _logger.LogWarning("Telegram SignalToken/BotToken not configured; skipping message");
-                return;
+                return null;
             }
 
             var chatId = _configuration.GetSection("Telegram")["TradeChatId"]
@@ -40,17 +55,24 @@ public sealed class TelegramNotifier : ITelegramNotifier
             if (string.IsNullOrWhiteSpace(chatId))
             {
                 _logger.LogWarning("Telegram TradeChatId/AlertChatId not configured; skipping message");
-                return;
+                return null;
             }
 
             var url = $"https://api.telegram.org/bot{token}/sendMessage";
 
-            var payload = new
+            // Build payload with optional reply_to_message_id for threading
+            var payload = new Dictionary<string, object>
             {
-                chat_id = chatId,
-                text = message,
-                disable_web_page_preview = true
+                ["chat_id"] = chatId,
+                ["text"] = message,
+                ["disable_web_page_preview"] = true
             };
+
+            if (replyToMessageId.HasValue)
+            {
+                payload["reply_to_message_id"] = replyToMessageId.Value;
+                _logger.LogInformation("Sending Telegram message as reply to message_id={ReplyTo}", replyToMessageId.Value);
+            }
 
             var res = await _httpClient.PostAsJsonAsync(url, payload, cancellationToken);
             var body = await res.Content.ReadAsStringAsync(cancellationToken);
@@ -58,29 +80,40 @@ public sealed class TelegramNotifier : ITelegramNotifier
             if (!res.IsSuccessStatusCode)
             {
                 _logger.LogWarning("Telegram sendMessage failed: {Status} {Body}", res.StatusCode, body);
-                return;
+                return null;
             }
 
-            // Telegram typically returns HTTP 200 with {"ok":true}. Be defensive if ok=false.
+            // Parse response to extract message_id
             try
             {
                 using var doc = JsonDocument.Parse(body);
                 if (doc.RootElement.TryGetProperty("ok", out var okProp) && okProp.ValueKind == JsonValueKind.False)
                 {
                     _logger.LogWarning("Telegram sendMessage returned ok=false: {Body}", body);
-                    return;
+                    return null;
+                }
+
+                // Extract message_id from response: {"ok":true,"result":{"message_id":123,...}}
+                if (doc.RootElement.TryGetProperty("result", out var result) &&
+                    result.TryGetProperty("message_id", out var messageIdProp))
+                {
+                    var messageId = messageIdProp.GetInt32();
+                    _logger.LogInformation("Telegram sendMessage succeeded: ChatId={ChatId}, MessageId={MessageId}", chatId, messageId);
+                    return messageId;
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // Ignore parse errors; a 200 response is usually fine.
+                _logger.LogWarning(ex, "Failed to parse message_id from Telegram response: {Body}", body);
             }
 
             _logger.LogInformation("Telegram sendMessage succeeded: ChatId={ChatId}", chatId);
+            return null;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Telegram sendMessage exception");
+            return null;
         }
     }
 }

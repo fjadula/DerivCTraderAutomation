@@ -15,7 +15,8 @@ class Program
 {
     static async Task Main(string[] args)
     {
-        // CRITICAL FIX: Parse --contentRoot from args FIRST
+        // Determine content root (where appsettings*.json + logs folder live)
+        // dotnet watch may run from solution root, so we resolve a usable base path.
         var contentRoot = Directory.GetCurrentDirectory();
         for (int i = 0; i < args.Length - 1; i++)
         {
@@ -27,41 +28,61 @@ class Program
             }
         }
 
-        Console.WriteLine("========================================");
-        Console.WriteLine("  DERIVCTRADER SIGNAL SCRAPER");
-        Console.WriteLine("========================================");
-        Console.WriteLine($"📁 Working Directory: {contentRoot}");
-        Console.WriteLine();
-
-        // Build configuration
-        var configBuilder = new ConfigurationBuilder()
-            .SetBasePath(contentRoot);
-
-        var productionFile = Path.Combine(contentRoot, "appsettings.Production.json");
-        if (File.Exists(productionFile))
+        static (string basePath, string fileName) ResolveSettingsBasePath(string initialBasePath)
         {
-            configBuilder.AddJsonFile("appsettings.Production.json", optional: false, reloadOnChange: true);
-            Console.WriteLine("✅ Using appsettings.Production.json");
-        }
-        else
-        {
-            configBuilder.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
-            Console.WriteLine("⚠️  Using appsettings.json");
-        }
+            var candidates = new List<string>
+            {
+                initialBasePath,
+                Path.Combine(initialBasePath, "src", "DerivCTrader.SignalScraper"),
+                AppContext.BaseDirectory
+            };
 
-        var configuration = configBuilder.Build();
+            foreach (var candidate in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(candidate) || !Directory.Exists(candidate))
+                    continue;
 
-        // Configure Serilog
-        Log.Logger = new LoggerConfiguration()
-            .ReadFrom.Configuration(configuration)
-            .WriteTo.File(
-                Path.Combine(contentRoot, "logs", "signalscraper-.txt"),
-                rollingInterval: RollingInterval.Day,
-                retainedFileCountLimit: 30)
-            .CreateLogger();
+                if (File.Exists(Path.Combine(candidate, "appsettings.Production.json")))
+                    return (candidate, "appsettings.Production.json");
+                if (File.Exists(Path.Combine(candidate, "appsettings.json")))
+                    return (candidate, "appsettings.json");
+            }
+
+            throw new FileNotFoundException(
+                "Could not find appsettings.Production.json or appsettings.json. " +
+                "Run from the SignalScraper folder or pass --contentRoot <path>.");
+        }
 
         try
         {
+            var resolved = ResolveSettingsBasePath(contentRoot);
+            contentRoot = resolved.basePath;
+            Directory.SetCurrentDirectory(contentRoot);
+
+            Console.WriteLine("========================================");
+            Console.WriteLine("  DERIVCTRADER SIGNAL SCRAPER");
+            Console.WriteLine("========================================");
+            Console.WriteLine($"📁 Working Directory: {contentRoot}");
+            Console.WriteLine();
+
+            // Build configuration
+            var configBuilder = new ConfigurationBuilder()
+                .SetBasePath(contentRoot)
+                .AddJsonFile(resolved.fileName, optional: false, reloadOnChange: true);
+
+            Console.WriteLine($"✅ Using {resolved.fileName}");
+
+            var configuration = configBuilder.Build();
+
+            // Configure Serilog
+            Log.Logger = new LoggerConfiguration()
+                .ReadFrom.Configuration(configuration)
+                .WriteTo.File(
+                    Path.Combine(contentRoot, "logs", "signalscraper-.txt"),
+                    rollingInterval: RollingInterval.Day,
+                    retainedFileCountLimit: 30)
+                .CreateLogger();
+
             Log.Information("Starting Deriv cTrader Signal Scraper...");
             Log.Information("Working directory: {ContentRoot}", contentRoot);
             Console.WriteLine("\n=== BUILDING HOST ===\n");
@@ -73,6 +94,7 @@ class Program
                 {
                     services.AddSingleton<IConfiguration>(configuration);
                     services.AddSingleton<ITradeRepository, SqlServerTradeRepository>();
+                    services.AddSingleton<IDashaTradeRepository, SqlServerDashaTradeRepository>(); // DashaTrade selective martingale
                     services.AddCTraderServices(configuration);
                     // Register signal parsers - ORDER MATTERS!
                     // Test channel parser MUST be registered FIRST
@@ -83,6 +105,19 @@ class Program
                     services.AddSingleton<ISignalParser, TradingHubVipParser>();
                     services.AddSingleton<ISignalParser, SyntheticIndicesParser>();
                     services.AddSingleton<ISignalParser, NewStratsParser>();
+                    services.AddSingleton<ISignalParser, PipsMoveParser>();
+                    services.AddSingleton<ISignalParser, FxTradingProfessorParser>();
+                    services.AddSingleton<ISignalParser, ChartSenseParser>();
+                    services.AddSingleton<ISignalParser, AFXGoldParser>();
+                    services.AddSingleton<ISignalParser, DerivPlusParser>();
+                    services.AddSingleton<ISignalParser, DashaTradeParser>();
+
+                    // CMFLIX batch parser (not ISignalParser - uses batch parsing)
+                    services.AddSingleton<CmflixParser>();
+
+                    // IzintzikaDeriv batch parser (not ISignalParser - uses batch parsing)
+                    services.AddSingleton<IzintzikaDerivParser>();
+
                     services.AddTransient<CTraderConnectionTest>();
                     services.AddHostedService<TelegramSignalScraperService>();
                     Log.Information("Services registered successfully");

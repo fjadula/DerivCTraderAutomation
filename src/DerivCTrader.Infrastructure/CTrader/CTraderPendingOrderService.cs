@@ -298,24 +298,37 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
                 return;
 
             var execEvent = ProtoOAExecutionEvent.Parser.ParseFrom(message.Payload);
-
             var execTypeName = execEvent.ExecutionType.ToString();
 
-            _logger.LogDebug("[DEBUG] OnClientMessageReceived: OrderId={OrderId}, ExecutionType={ExecutionType}", execEvent.Order?.OrderId, execTypeName);
+            // Log ALL execution events for diagnostics
+            var positionId = TryExtractPositionId(execEvent);
+            _logger.LogInformation("[DEBUG-ALL-EVENTS] Received execution event: Type={ExecutionType}, PositionId={PositionId}, OrderId={OrderId}",
+                execTypeName, positionId?.ToString() ?? "null", execEvent.Order?.OrderId.ToString() ?? "null");
 
-            // Only treat as a fill when cTrader reports the order was filled.
-            if (execEvent.ExecutionType != ProtoOAExecutionType.OrderFilled &&
-                execEvent.ExecutionType != ProtoOAExecutionType.OrderPartialFill)
+            // Check for position closed events (these can come as various execution types)
+            if (IsPositionClosedExecution(execTypeName))
             {
-                // Still handle position closed events for DB + Telegram.
-                if (IsPositionClosedExecution(execTypeName))
-                {
-                    _ = Task.Run(async () => await HandlePositionClosedAsync(execEvent, execTypeName));
-                }
-
+                _logger.LogInformation("[POSITION-CLOSE] Detected position close event: Type={ExecutionType}, PositionId={PositionId}", execTypeName, positionId);
+                _ = Task.Run(async () => await HandlePositionClosedAsync(execEvent, execTypeName));
                 return;
             }
 
+            // Check for SL/TP modification events (OrderModified, OrderReplaced, AmendOrder, etc.)
+            if (IsSlTpModificationEvent(execTypeName))
+            {
+                _logger.LogInformation("[SLTP-MODIFY] Detected SL/TP modification event: Type={ExecutionType}, PositionId={PositionId}", execTypeName, positionId);
+                _ = Task.Run(async () => await HandleSlTpModificationAsync(execEvent, execTypeName));
+                return;
+            }
+
+            // Only treat as an entry fill when cTrader reports the order was filled.
+            if (execEvent.ExecutionType != ProtoOAExecutionType.OrderFilled &&
+                execEvent.ExecutionType != ProtoOAExecutionType.OrderPartialFill)
+            {
+                return;
+            }
+
+            // OrderId is a long in the cTrader protobuf
             var orderId = execEvent.Order?.OrderId;
             if (!orderId.HasValue || orderId.Value <= 0)
                 return;
@@ -325,16 +338,30 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
             {
                 if (!_pendingExecutions.TryGetValue(orderId.Value, out watch))
                 {
-                    _logger.LogWarning("[DEBUG] Fill event received for unknown OrderId={OrderId}. Possible race condition or missed tracking.", orderId.Value);
+                    // This could be a close order or an order we didn't track - check if it's closing an existing position
+                    _logger.LogInformation("[DEBUG] Fill event for unknown OrderId={OrderId}. Checking if it's a position close...", orderId.Value);
+
+                    // Try to handle as a position close (the method will check if a ForexTrade exists for this position)
+                    if (positionId.HasValue && positionId.Value > 0)
+                    {
+                        _ = Task.Run(async () => await TryHandlePositionCloseByFillAsync(execEvent, execTypeName, positionId.Value));
+                    }
                     return;
                 }
 
                 // Remove first to prevent duplicates on multiple events.
                 _pendingExecutions.Remove(orderId.Value);
-                _logger.LogDebug("[DEBUG] Removed from _pendingExecutions: OrderId={OrderId}, SignalId={SignalId}, IsOpposite={IsOpposite}", orderId.Value, watch?.Signal?.SignalId, watch?.IsOpposite);
+                _logger.LogDebug(
+                    "[DEBUG] Removed from _pendingExecutions: OrderId={OrderId}, SignalId={SignalId}, IsOpposite={IsOpposite}",
+                    orderId.Value,
+                    watch?.Signal?.SignalId,
+                    watch?.IsOpposite);
             }
 
-            _ = Task.Run(async () => await HandlePendingExecutionAsync(execEvent, watch));
+            if (watch != null)
+            {
+                _ = Task.Run(async () => await HandlePendingExecutionAsync(execEvent, watch));
+            }
         }
         catch (Exception ex)
         {
@@ -347,18 +374,24 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
     {
         try
         {
+            // Ensure we have a valid signal to work with
+            if (watch.Signal == null)
+            {
+                _logger.LogWarning("[SKIP] HandlePendingExecutionAsync called with null Signal for OrderId={OrderId}", watch.OrderId);
+                return;
+            }
+
+            // OrderId is a long in cTrader protobuf, fallback to watch.OrderId if not present
             var orderId = execEvent.Order?.OrderId ?? watch.OrderId;
             var positionId = TryExtractPositionId(execEvent);
             var executedPrice = TryExtractExecutedPrice(execEvent);
+
             _logger.LogInformation("[TRACE] Entered HandlePendingExecutionAsync: OrderId={OrderId}, PositionId={PositionId}, Asset={Asset}, Direction={Direction}, IsOpposite={IsOpposite}",
                 orderId, positionId, watch.Signal.Asset, watch.EffectiveDirection, watch.IsOpposite);
 
             _logger.LogInformation(
                 "🎯 Pending order FILLED: OrderId={OrderId}, PositionId={PositionId}, Asset={Asset}, Direction={Direction}",
-                orderId,
-                positionId,
-                watch.Signal.Asset,
-                watch.EffectiveDirection);
+                orderId, positionId, watch.Signal.Asset, watch.EffectiveDirection);
 
             // Apply SL/TP post-fill if present.
             var stopLoss = watch.Signal.StopLoss.HasValue ? (double?)watch.Signal.StopLoss.Value : null;
@@ -425,13 +458,15 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
                 _logger.LogWarning("[ENQUEUE-SKIP] No valid PositionId available for OrderId={OrderId}, skipping queue entry", orderId);
             }
             _logger.LogInformation("[TRACE] Exiting HandlePendingExecutionAsync: OrderId={OrderId}, PositionId={PositionId}, Asset={Asset}, Direction={Direction}, IsOpposite={IsOpposite}",
-                watch.OrderId, positionId, watch.Signal.Asset, watch.EffectiveDirection, watch.IsOpposite);
+                orderId, positionId, watch.Signal.Asset, watch.EffectiveDirection, watch.IsOpposite);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed handling pending execution for OrderId={OrderId}", watch.OrderId);
         }
     }
+
+
 
     private async Task PersistForexTradeFillAsync(
         ParsedSignal signal,
@@ -459,6 +494,8 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
                 // Persist the requested entry from the signal as the trade's EntryPrice.
                 // The fill/execution price can legitimately differ (e.g., marketable LIMIT fills at better price).
                 EntryPrice = signal.EntryPrice ?? (executedPrice.HasValue ? (decimal?)Convert.ToDecimal(executedPrice.Value) : null),
+                SL = signal.StopLoss,
+                TP = signal.TakeProfit,
                 EntryTime = DateTime.UtcNow,
                 Status = "OPEN",
                 Strategy = BuildStrategyName(signal),
@@ -491,10 +528,7 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
         bool? sltpApplied)
     {
         // User-required format:
-        // 2025-12-12 17:47 UTC
-        // GBPUSD Sell  1.34750
-        // TP: 1.30636
-        // SL: 1.36750
+        // 🎯 GBPUSD Sell @ 1.27500, TP: 1.26500, SL: 1.28000
         var utcNow = DateTime.UtcNow;
 
         var entry = signal.EntryPrice;
@@ -511,41 +545,89 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
         var tpDecimal = tp.HasValue ? (decimal?)Convert.ToDecimal(tp.Value) : null;
 
         var msg =
-            $"{utcNow:yyyy-MM-dd HH:mm} UTC\n" +
-            $"{signal.Asset} {effectiveDirection}  {F(entry)}\n" +
-            $"TP: {F(tpDecimal)}\n" +
-            $"SL: {F(sl)}";
+            $"🎯 {signal.Asset} {effectiveDirection} @ {F(entry)}, TP: {F(tpDecimal)}, SL: {F(sl)}";
 
-        await _telegram.SendTradeMessageAsync(msg);
+        // Send notification and capture message_id for threading
+        int? sentMessageId;
+        if (signal.NotificationMessageId.HasValue)
+        {
+            sentMessageId = await _telegram.SendTradeMessageAsync(msg, signal.NotificationMessageId.Value);
+        }
+        else
+        {
+            sentMessageId = await _telegram.SendTradeMessageWithIdAsync(msg);
+        }
+
+        // Store the message_id in ForexTrade for threading close/modify notifications
+        if (sentMessageId.HasValue)
+        {
+            int? tradeId = null;
+            lock (_positionLock)
+            {
+                _positionToForexTradeId.TryGetValue(positionId, out var id);
+                tradeId = id > 0 ? id : null;
+            }
+
+            if (tradeId.HasValue)
+            {
+                try
+                {
+                    await _repository.UpdateForexTradeTelegramMessageIdAsync(tradeId.Value, sentMessageId.Value);
+                    _logger.LogInformation("[TELEGRAM-THREAD] Stored TelegramMessageId={MessageId} for TradeId={TradeId}, PositionId={PositionId}",
+                        sentMessageId.Value, tradeId.Value, positionId);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to store TelegramMessageId for TradeId={TradeId}", tradeId.Value);
+                }
+            }
+        }
     }
 
     private async Task HandlePositionClosedAsync(ProtoOAExecutionEvent execEvent, string execTypeName)
     {
         try
         {
+            _logger.LogInformation("[TRACE] Entered HandlePositionClosedAsync for position close event. Checking positionId...");
             var positionId = TryExtractPositionId(execEvent);
+            _logger.LogInformation("[TRACE] HandlePositionClosedAsync: Extracted PositionId={PositionId}", positionId);
             if (!positionId.HasValue || positionId.Value <= 0)
+            {
+                _logger.LogWarning("[TRACE] HandlePositionClosedAsync: No valid PositionId found. Skipping forex trade update.");
                 return;
+            }
 
             int? tradeId = null;
             lock (_positionLock)
             {
                 if (_positionToForexTradeId.TryGetValue(positionId.Value, out var id))
+                {
                     tradeId = id;
+                    _logger.LogInformation("[TRACE] HandlePositionClosedAsync: Found tradeId={TradeId} for PositionId={PositionId}", tradeId, positionId);
+                }
+                else
+                {
+                    _logger.LogWarning("[TRACE] HandlePositionClosedAsync: No tradeId found in _positionToForexTradeId for PositionId={PositionId}", positionId);
+                }
             }
 
             ForexTrade? trade = null;
             if (tradeId.HasValue)
             {
                 trade = await _repository.GetForexTradeByIdAsync(tradeId.Value);
+                _logger.LogInformation("[TRACE] HandlePositionClosedAsync: Loaded ForexTrade by TradeId={TradeId}: {Trade}", tradeId, trade);
             }
             else
             {
                 trade = await _repository.FindLatestForexTradeByCTraderPositionIdAsync(positionId.Value);
+                _logger.LogInformation("[TRACE] HandlePositionClosedAsync: Loaded ForexTrade by PositionId={PositionId}: {Trade}", positionId, trade);
             }
 
             if (trade == null)
+            {
+                _logger.LogWarning("[TRACE] HandlePositionClosedAsync: No ForexTrade found for PositionId={PositionId}. Skipping update.", positionId);
                 return;
+            }
 
             var exitPrice = TryExtractExitPrice(execEvent);
             var pnl = TryExtractProfit(execEvent);
@@ -554,23 +636,84 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
             trade.ExitPrice = exitPrice.HasValue ? (decimal?)Convert.ToDecimal(exitPrice.Value) : trade.ExitPrice;
             trade.PnL = pnl.HasValue ? (decimal?)pnl.Value : trade.PnL;
             trade.Status = "CLOSED";
+            trade.Outcome = DetermineOutcome(trade.PnL);
+            trade.RR = CalculateRiskReward(trade.EntryPrice, trade.SL, trade.TP);
             trade.Notes = AppendCloseInfo(trade.Notes, execTypeName);
+
+            _logger.LogInformation("[TRACE] HandlePositionClosedAsync: Updating ForexTrade: TradeId={TradeId}, ExitPrice={ExitPrice}, ExitTime={ExitTime}, PnL={PnL}, Outcome={Outcome}, RR={RR}, Status={Status}", trade.TradeId, trade.ExitPrice, trade.ExitTime, trade.PnL, trade.Outcome, trade.RR, trade.Status);
+            await _repository.UpdateForexTradeAsync(trade);
+
+            var reason = InferCloseReason(execTypeName, trade.Notes, trade.ExitPrice, trade.SL, trade.TP);
+            var msg = FormatCloseMessage(trade.Symbol, trade.Direction, trade.ExitPrice, trade.PnL, reason, trade.RR);
+
+            // Send as reply to the fill notification if available
+            if (trade.TelegramMessageId.HasValue)
+            {
+                await _telegram.SendTradeMessageAsync(msg, trade.TelegramMessageId.Value);
+            }
+            else
+            {
+                await _telegram.SendTradeMessageAsync(msg);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to handle position closed event");
+        }
+    }
+
+    /// <summary>
+    /// Handles potential position close when we receive an OrderFilled event for an unknown order.
+    /// This can happen when a position is closed manually or via a close order we didn't track.
+    /// </summary>
+    private async Task TryHandlePositionCloseByFillAsync(ProtoOAExecutionEvent execEvent, string execTypeName, long positionId)
+    {
+        try
+        {
+            _logger.LogInformation("[TRY-CLOSE] Checking if fill event is closing position: PositionId={PositionId}", positionId);
+
+            // Check if we have an OPEN ForexTrade for this position
+            var trade = await _repository.FindLatestForexTradeByCTraderPositionIdAsync(positionId);
+
+            if (trade == null)
+            {
+                _logger.LogDebug("[TRY-CLOSE] No ForexTrade found for PositionId={PositionId}", positionId);
+                return;
+            }
+
+            if (trade.Status != "OPEN")
+            {
+                _logger.LogDebug("[TRY-CLOSE] ForexTrade for PositionId={PositionId} is not OPEN (Status={Status})", positionId, trade.Status);
+                return;
+            }
+
+            // This fill event is likely closing our tracked position
+            _logger.LogInformation("[TRY-CLOSE] Found OPEN ForexTrade for PositionId={PositionId}, treating as position close", positionId);
+
+            var exitPrice = TryExtractExitPrice(execEvent) ?? TryExtractExecutedPrice(execEvent);
+            var pnl = TryExtractProfit(execEvent);
+
+            trade.ExitTime = DateTime.UtcNow;
+            trade.ExitPrice = exitPrice.HasValue ? (decimal?)Convert.ToDecimal(exitPrice.Value) : trade.ExitPrice;
+            trade.PnL = pnl.HasValue ? (decimal?)pnl.Value : trade.PnL;
+            trade.Status = "CLOSED";
+            trade.Outcome = DetermineOutcome(trade.PnL);
+            trade.RR = CalculateRiskReward(trade.EntryPrice, trade.SL, trade.TP);
+            trade.Notes = AppendCloseInfo(trade.Notes, $"ClosedByFill_{execTypeName}");
+
+            _logger.LogInformation("[TRY-CLOSE] Updating ForexTrade: TradeId={TradeId}, ExitPrice={ExitPrice}, ExitTime={ExitTime}, PnL={PnL}, Outcome={Outcome}, RR={RR}, Status={Status}",
+                trade.TradeId, trade.ExitPrice, trade.ExitTime, trade.PnL, trade.Outcome, trade.RR, trade.Status);
 
             await _repository.UpdateForexTradeAsync(trade);
 
-            var reason = InferCloseReason(execTypeName, trade.Notes);
-            var pnlText = trade.PnL.HasValue ? trade.PnL.Value.ToString("+0.##;-0.##;0") : "?";
-            var exitText = trade.ExitPrice.HasValue ? trade.ExitPrice.Value.ToString() : "?";
-
-            var msg =
-                $"🏁 CLOSED {trade.Symbol} {trade.Direction} @ {exitText}\n" +
-                $"PositionId={positionId.Value} PnL={pnlText} Reason={reason}";
+            var reason = InferCloseReason(execTypeName, trade.Notes, trade.ExitPrice, trade.SL, trade.TP);
+            var msg = FormatCloseMessage(trade.Symbol, trade.Direction, trade.ExitPrice, trade.PnL, reason, trade.RR);
 
             await _telegram.SendTradeMessageAsync(msg);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to handle position closed event");
+            _logger.LogWarning(ex, "Failed to handle potential position close by fill for PositionId={PositionId}", positionId);
         }
     }
 
@@ -586,6 +729,196 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
                execTypeName.Contains("ClosePosition", StringComparison.OrdinalIgnoreCase) ||
                execTypeName.Contains("StopLoss", StringComparison.OrdinalIgnoreCase) ||
                execTypeName.Contains("TakeProfit", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Detect if the execution event is a SL/TP modification (order amended/modified)
+    /// </summary>
+    private static bool IsSlTpModificationEvent(string execTypeName)
+    {
+        if (string.IsNullOrWhiteSpace(execTypeName))
+            return false;
+
+        // cTrader sends these types when SL/TP is modified on an existing position
+        return execTypeName.Contains("Modified", StringComparison.OrdinalIgnoreCase) ||
+               execTypeName.Contains("Replaced", StringComparison.OrdinalIgnoreCase) ||
+               execTypeName.Contains("Amend", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Handle SL/TP modification events - log the change and send notification for filled orders.
+    /// Handles both pending orders (ParsedSignalsQueue) and active positions (ForexTrades).
+    /// </summary>
+    private async Task HandleSlTpModificationAsync(ProtoOAExecutionEvent execEvent, string execTypeName)
+    {
+        try
+        {
+            var positionId = TryExtractPositionId(execEvent);
+            var orderId = execEvent.Order?.OrderId;
+
+            // Extract the new SL/TP values from the event
+            var newSL = TryExtractStopLoss(execEvent);
+            var newTP = TryExtractTakeProfit(execEvent);
+            var newSLDecimal = newSL.HasValue ? (decimal?)Convert.ToDecimal(newSL.Value) : null;
+            var newTPDecimal = newTP.HasValue ? (decimal?)Convert.ToDecimal(newTP.Value) : null;
+
+            // Case 1: Check if this is a pending order we're tracking
+            PendingExecutionWatch? watch = null;
+            if (orderId.HasValue && orderId.Value > 0)
+            {
+                lock (_pendingLock)
+                {
+                    _pendingExecutions.TryGetValue(orderId.Value, out watch);
+                }
+            }
+
+            if (watch?.Signal != null)
+            {
+                // This is a pending order modification (not yet filled)
+                _logger.LogInformation(
+                    "[SLTP-MODIFY] Pending Order {OrderId} ({Asset}) SL/TP modified: NewSL={NewSL}, NewTP={NewTP}",
+                    orderId, watch.Signal.Asset, newSL?.ToString() ?? "unchanged", newTP?.ToString() ?? "unchanged");
+
+                // Update ParsedSignalsQueue (database only - no notification for pending orders)
+                if (watch.Signal.SignalId > 0)
+                {
+                    await _repository.UpdateParsedSignalSlTpAsync(watch.Signal.SignalId, newSLDecimal, newTPDecimal);
+                }
+
+                // Update the watch object in memory as well
+                if (newSLDecimal.HasValue) watch.Signal.StopLoss = newSLDecimal.Value;
+                if (newTPDecimal.HasValue) watch.Signal.TakeProfit = newTPDecimal.Value;
+
+                _logger.LogInformation("[SLTP-MODIFY] Database updated for pending order {OrderId} - no notification sent (order not filled yet)", orderId);
+                return;
+            }
+
+            // Case 2: Check if this is an active position (filled trade)
+            if (!positionId.HasValue || positionId.Value <= 0)
+            {
+                _logger.LogDebug("[SLTP-MODIFY] No valid PositionId in modification event and no pending order found");
+                return;
+            }
+
+            var trade = await _repository.FindLatestForexTradeByCTraderPositionIdAsync(positionId.Value);
+            if (trade == null)
+            {
+                _logger.LogDebug("[SLTP-MODIFY] No ForexTrade found for PositionId={PositionId}", positionId.Value);
+                return;
+            }
+
+            _logger.LogInformation(
+                "[SLTP-MODIFY] Position {PositionId} ({Symbol}) SL/TP modified: NewSL={NewSL}, NewTP={NewTP}",
+                positionId.Value, trade.Symbol, newSL?.ToString() ?? "unchanged", newTP?.ToString() ?? "unchanged");
+
+            // Update the trade SL/TP columns
+            if (newSLDecimal.HasValue) trade.SL = newSLDecimal.Value;
+            if (newTPDecimal.HasValue) trade.TP = newTPDecimal.Value;
+
+            // Update the trade notes with the modification info
+            var modInfo = $"SLTPModified@{DateTime.UtcNow:HH:mm:ss}";
+            if (newSL.HasValue) modInfo += $";NewSL={newSL.Value}";
+            if (newTP.HasValue) modInfo += $";NewTP={newTP.Value}";
+            trade.Notes = AppendCloseInfo(trade.Notes, modInfo);
+
+            await _repository.UpdateForexTradeAsync(trade);
+
+            // ✅ Send notification for active filled positions (reply to fill notification)
+            var posMsg = $"📝 SL/TP Modified: {trade.Symbol} {trade.Direction}";
+            if (newSL.HasValue && newTP.HasValue)
+            {
+                posMsg += $"\nSL: {newSL.Value:0.00000}, TP: {newTP.Value:0.00000}";
+            }
+            else if (newSL.HasValue)
+            {
+                posMsg += $"\nSL: {newSL.Value:0.00000}";
+            }
+            else if (newTP.HasValue)
+            {
+                posMsg += $"\nTP: {newTP.Value:0.00000}";
+            }
+
+            if (trade.TelegramMessageId.HasValue)
+            {
+                await _telegram.SendTradeMessageAsync(posMsg.Trim(), trade.TelegramMessageId.Value);
+                _logger.LogInformation("[SLTP-MODIFY] Telegram notification sent as reply to message {MessageId}", trade.TelegramMessageId.Value);
+            }
+            else
+            {
+                await _telegram.SendTradeMessageAsync(posMsg.Trim());
+                _logger.LogInformation("[SLTP-MODIFY] Telegram notification sent (no thread - TelegramMessageId not available)");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to handle SL/TP modification event");
+        }
+    }
+
+    /// <summary>
+    /// Extract Stop Loss price from execution event
+    /// </summary>
+    private static double? TryExtractStopLoss(ProtoOAExecutionEvent execEvent)
+    {
+        try
+        {
+            // Try Position.StopLoss
+            var position = execEvent.GetType().GetProperty("Position")?.GetValue(execEvent);
+            if (position != null)
+            {
+                var sl = TryExtractScaledPrice(position, new[] { "StopLoss", "StopLossPrice" });
+                if (sl.HasValue && sl.Value > 0)
+                    return sl;
+            }
+
+            // Try Order.StopLoss
+            var order = execEvent.GetType().GetProperty("Order")?.GetValue(execEvent);
+            if (order != null)
+            {
+                var sl = TryExtractScaledPrice(order, new[] { "StopLoss", "StopLossPrice" });
+                if (sl.HasValue && sl.Value > 0)
+                    return sl;
+            }
+
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Extract Take Profit price from execution event
+    /// </summary>
+    private static double? TryExtractTakeProfit(ProtoOAExecutionEvent execEvent)
+    {
+        try
+        {
+            // Try Position.TakeProfit
+            var position = execEvent.GetType().GetProperty("Position")?.GetValue(execEvent);
+            if (position != null)
+            {
+                var tp = TryExtractScaledPrice(position, new[] { "TakeProfit", "TakeProfitPrice" });
+                if (tp.HasValue && tp.Value > 0)
+                    return tp;
+            }
+
+            // Try Order.TakeProfit
+            var order = execEvent.GetType().GetProperty("Order")?.GetValue(execEvent);
+            if (order != null)
+            {
+                var tp = TryExtractScaledPrice(order, new[] { "TakeProfit", "TakeProfitPrice" });
+                if (tp.HasValue && tp.Value > 0)
+                    return tp;
+            }
+
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static string BuildForexNotes(
@@ -625,18 +958,138 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
         return notes + ";" + marker;
     }
 
-    private static string InferCloseReason(string execTypeName, string? notes)
+    private static string InferCloseReason(string execTypeName, string? notes, decimal? exitPrice = null, decimal? sl = null, decimal? tp = null)
     {
+        // First check explicit execution type names
         if (execTypeName.Contains("TakeProfit", StringComparison.OrdinalIgnoreCase) ||
             (notes?.Contains("TakeProfit", StringComparison.OrdinalIgnoreCase) ?? false))
-            return "TP";
+            return "TP Hit";
 
         if (execTypeName.Contains("StopLoss", StringComparison.OrdinalIgnoreCase) ||
             (notes?.Contains("StopLoss", StringComparison.OrdinalIgnoreCase) ?? false))
-            return "SL";
+            return "SL Hit";
 
-        // Best-effort: anything else is treated as an early/manual close.
-        return "EARLY";
+        // If exit price is available, check which target (SL or TP) is CLOSEST
+        if (exitPrice.HasValue && exitPrice.Value > 0)
+        {
+            decimal? slDiff = null;
+            decimal? tpDiff = null;
+
+            if (sl.HasValue && sl.Value > 0)
+                slDiff = Math.Abs(exitPrice.Value - sl.Value);
+
+            if (tp.HasValue && tp.Value > 0)
+                tpDiff = Math.Abs(exitPrice.Value - tp.Value);
+
+            // Determine which is closer
+            if (slDiff.HasValue && tpDiff.HasValue)
+            {
+                // Both SL and TP available - pick the closest one
+                // Use a reasonable tolerance (0.5% of the price) to consider it a hit
+                var tolerance = exitPrice.Value * 0.005m;
+
+                if (tpDiff.Value < slDiff.Value && tpDiff.Value <= tolerance)
+                    return "TP Hit";
+                if (slDiff.Value < tpDiff.Value && slDiff.Value <= tolerance)
+                    return "SL Hit";
+                // If they're equal or both within tolerance, check which is closer
+                if (tpDiff.Value <= tolerance || slDiff.Value <= tolerance)
+                    return tpDiff.Value <= slDiff.Value ? "TP Hit" : "SL Hit";
+            }
+            else if (slDiff.HasValue)
+            {
+                var tolerance = sl!.Value * 0.005m;
+                if (slDiff.Value <= tolerance)
+                    return "SL Hit";
+            }
+            else if (tpDiff.HasValue)
+            {
+                var tolerance = tp!.Value * 0.005m;
+                if (tpDiff.Value <= tolerance)
+                    return "TP Hit";
+            }
+        }
+
+        // Best-effort: anything else is treated as a manual close.
+        return "Closed Manually";
+    }
+
+    /// <summary>
+    /// Calculate Risk:Reward ratio from entry, SL, and TP at trade close
+    /// Format: "1:X" where X is the reward relative to 1 unit of risk
+    /// </summary>
+    private static string? CalculateRiskReward(decimal? entryPrice, decimal? sl, decimal? tp)
+    {
+        if (!entryPrice.HasValue || entryPrice.Value <= 0)
+            return null;
+        if (!sl.HasValue || sl.Value <= 0)
+            return null;
+        if (!tp.HasValue || tp.Value <= 0)
+            return null;
+
+        var entry = entryPrice.Value;
+        var stopLoss = sl.Value;
+        var takeProfit = tp.Value;
+
+        // Calculate distances
+        var riskDistance = Math.Abs(entry - stopLoss);
+        var rewardDistance = Math.Abs(entry - takeProfit);
+
+        if (riskDistance <= 0)
+            return null;
+
+        // Calculate ratio: reward per unit of risk
+        var ratio = rewardDistance / riskDistance;
+
+        // Format as "1:X" (e.g., "1:2", "1:3", "1:0.5")
+        if (ratio >= 1)
+        {
+            return $"1:{ratio:0.#}";
+        }
+        else
+        {
+            // If risk > reward, show as "X:1"
+            var inverseRatio = riskDistance / rewardDistance;
+            return $"{inverseRatio:0.#}:1";
+        }
+    }
+
+    /// <summary>
+    /// Determine trade outcome based on PnL value
+    /// </summary>
+    private static string DetermineOutcome(decimal? pnl)
+    {
+        if (!pnl.HasValue)
+            return "Unknown";
+        if (pnl.Value > 0)
+            return "Profit";
+        if (pnl.Value < 0)
+            return "Loss";
+        return "Breakeven";
+    }
+
+    /// <summary>
+    /// Format the close notification message with proper emoji and format
+    /// </summary>
+    private static string FormatCloseMessage(string symbol, string direction, decimal? exitPrice, decimal? pnl, string reason, string? rr = null)
+    {
+        var exitText = exitPrice.HasValue && exitPrice.Value > 0
+            ? exitPrice.Value.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture)
+            : "?";
+
+        // Determine profit/loss status
+        var isProfit = pnl.HasValue && pnl.Value > 0;
+        var isLoss = pnl.HasValue && pnl.Value < 0;
+        var pnlEmoji = isProfit ? "✅" : (isLoss ? "❌" : "➖");
+        var pnlText = isProfit ? "Profit" : (isLoss ? "Loss" : "BE");
+
+        var msg = $"🏁 CLOSED {symbol} {direction} @ {exitText}\n" +
+                  $"{pnlEmoji} PnL={pnlText} Reason= {reason}";
+
+        if (!string.IsNullOrWhiteSpace(rr))
+            msg += $"\n⚖️ R:R={rr}";
+
+        return msg;
     }
 
     private static double? TryExtractExecutedPrice(ProtoOAExecutionEvent execEvent)
@@ -663,13 +1116,34 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
     {
         try
         {
-            var position = execEvent.GetType().GetProperty("Position")?.GetValue(execEvent);
-            var p = TryExtractDouble(position, new[] { "ClosePrice", "ExecutionPrice", "Price" });
-            if (p.HasValue)
-                return p;
-
+            // Try Deal.ExecutionPrice first (most reliable for close events)
             var deal = execEvent.GetType().GetProperty("Deal")?.GetValue(execEvent);
-            return TryExtractDouble(deal, new[] { "ExecutionPrice", "Price" });
+            if (deal != null)
+            {
+                var dealPrice = TryExtractScaledPrice(deal, new[] { "ExecutionPrice", "Price" });
+                if (dealPrice.HasValue && dealPrice.Value > 0)
+                    return dealPrice;
+            }
+
+            // Try Position properties
+            var position = execEvent.GetType().GetProperty("Position")?.GetValue(execEvent);
+            if (position != null)
+            {
+                var posPrice = TryExtractScaledPrice(position, new[] { "Price", "ExecutionPrice" });
+                if (posPrice.HasValue && posPrice.Value > 0)
+                    return posPrice;
+            }
+
+            // Try Order.ExecutionPrice
+            var order = execEvent.GetType().GetProperty("Order")?.GetValue(execEvent);
+            if (order != null)
+            {
+                var orderPrice = TryExtractScaledPrice(order, new[] { "ExecutionPrice", "Price" });
+                if (orderPrice.HasValue && orderPrice.Value > 0)
+                    return orderPrice;
+            }
+
+            return null;
         }
         catch
         {
@@ -677,22 +1151,116 @@ public class CTraderPendingOrderService : ICTraderPendingOrderService
         }
     }
 
+    /// <summary>
+    /// Extract and scale price from cTrader protobuf (prices are stored as long with 5 decimal places)
+    /// </summary>
+    private static double? TryExtractScaledPrice(object? obj, string[] propertyNames)
+    {
+        if (obj == null)
+            return null;
+
+        foreach (var name in propertyNames)
+        {
+            var prop = obj.GetType().GetProperty(name);
+            var value = prop?.GetValue(obj);
+            if (value == null)
+                continue;
+
+            try
+            {
+                var rawValue = Convert.ToDouble(value);
+                // cTrader stores prices as scaled integers (e.g., 2447500000 = 2447.5)
+                // For most instruments, divide by 100000 (5 decimal places)
+                // For synthetic indices like Volatility 25, may need different scaling
+                if (rawValue > 1000000) // Likely a scaled integer
+                {
+                    return rawValue / 100000.0; // Standard 5 decimal scaling
+                }
+                return rawValue;
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        return null;
+    }
+
     private static decimal? TryExtractProfit(ProtoOAExecutionEvent execEvent)
     {
         try
         {
+            // Try Deal first (most reliable for close events)
             var deal = execEvent.GetType().GetProperty("Deal")?.GetValue(execEvent);
-            var d = TryExtractDecimal(deal, new[] { "Profit", "GrossProfit", "Pnl", "PnL" });
-            if (d.HasValue)
-                return d;
+            if (deal != null)
+            {
+                // Try ClosePositionDetail - look for actual profit fields, NOT Balance
+                // Balance is the account balance after the trade, not the P&L
+                var closeDetail = deal.GetType().GetProperty("ClosePositionDetail")?.GetValue(deal);
+                if (closeDetail != null)
+                {
+                    // Priority: GrossProfit > Profit > ClosedVolume-based calculation
+                    // Explicitly avoid "Balance" as it's the account balance, not trade P&L
+                    var profitPnl = TryExtractScaledDecimal(closeDetail, new[] { "GrossProfit", "Profit", "NetProfit" });
+                    if (profitPnl.HasValue)
+                        return profitPnl;
+                }
+
+                // Try direct deal properties
+                var dealPnl = TryExtractScaledDecimal(deal, new[] { "Pnl", "PnL", "GrossProfit", "Profit" });
+                if (dealPnl.HasValue)
+                    return dealPnl;
+            }
 
             var position = execEvent.GetType().GetProperty("Position")?.GetValue(execEvent);
-            return TryExtractDecimal(position, new[] { "Profit", "GrossProfit", "Pnl", "PnL" });
+            if (position != null)
+            {
+                var posPnl = TryExtractScaledDecimal(position, new[] { "Pnl", "PnL", "GrossProfit", "Profit" });
+                if (posPnl.HasValue)
+                    return posPnl;
+            }
+
+            return null;
         }
         catch
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Extract and scale decimal value (PnL values in cTrader are in cents/100)
+    /// </summary>
+    private static decimal? TryExtractScaledDecimal(object? obj, string[] propertyNames)
+    {
+        if (obj == null)
+            return null;
+
+        foreach (var name in propertyNames)
+        {
+            var prop = obj.GetType().GetProperty(name);
+            var value = prop?.GetValue(obj);
+            if (value == null)
+                continue;
+
+            try
+            {
+                var rawValue = Convert.ToDecimal(value);
+                // cTrader stores money values in cents (divide by 100)
+                if (Math.Abs(rawValue) > 100 && name != "Swap") // Likely in cents
+                {
+                    return rawValue / 100m;
+                }
+                return rawValue;
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        return null;
     }
 
     private static double? TryExtractDouble(object? obj, string[] propertyNames)

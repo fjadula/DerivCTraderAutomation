@@ -19,16 +19,15 @@ This guide explains how to deploy DerivCTrader to your VPS using Azure DevOps.
    | `TELEGRAM_BOT_TOKEN` | Secret | Bot token for deployment notifications | `123456:ABC-DEF...` |
    | `TELEGRAM_CHAT_ID` | Secret | Chat ID for notifications | `-1001234567890` |
 
-3. **Telegram Session Files**
-   
-   **IMPORTANT**: Before first deployment, you must create Telegram session files on the VPS:
-   
-   - Run `DerivCTrader.SignalScraper.exe` locally first
-   - Authenticate both Telegram accounts when prompted
-   - This creates `DerivCTrader.session` and `DerivCTrader2.session`
-   - Copy these files to VPS: `C:\Services\DerivCTraderSignalScraper\`
-   
-   **Session files will be preserved across deployments** - the pipeline automatically backs them up.
+3. **Telegram Session Files (via Azure DevOps Secure Files)**
+
+   Session files are now managed through Azure DevOps Secure Files for automatic deployment.
+
+   **How It Works:**
+   - Pipeline downloads session file from Secure Files during build
+   - Session file is included in the artifact automatically
+   - No manual copying to VPS required
+   - Session files preserved across deployments
 
 ## Deployment Process
 
@@ -38,20 +37,18 @@ This guide explains how to deploy DerivCTrader to your VPS using Azure DevOps.
    ```powershell
    cd src\DerivCTrader.SignalScraper
    dotnet run
-   # Authenticate both Telegram accounts when prompted
+   # Authenticate Telegram accounts when prompted
+   # This creates WTelegram.session in the bin folder
    ```
 
-2. **Copy Sessions to VPS**
-   ```powershell
-   # Create directory on VPS
-   New-Item -ItemType Directory -Path "C:\Services\DerivCTraderSignalScraper" -Force
-   
-   # Copy session files (replace <VPS_IP> and adjust path)
-   Copy-Item "DerivCTrader.session" -Destination "\\<VPS_IP>\C$\Services\DerivCTraderSignalScraper\"
-   Copy-Item "DerivCTrader2.session" -Destination "\\<VPS_IP>\C$\Services\DerivCTraderSignalScraper\"
-   ```
+2. **Upload Session to Azure DevOps Secure Files**
+   - Go to Azure DevOps → Pipelines → Library → Secure files
+   - Click "+ Secure file"
+   - Upload `WTelegram.session` from: `src\DerivCTrader.SignalScraper\bin\WTelegram.session`
+   - Name it: `WTelegram.session`
+   - Check "Authorize for use in all pipelines"
 
-3. **Configure Azure DevOps**
+3. **Configure Azure DevOps
    - Add pipeline variables (see Prerequisites)
    - Ensure agent pool "Default" exists and has VPS access
    - Test connection: `Test-WSMan -ComputerName 108.181.161.170`
@@ -121,14 +118,23 @@ Get-Content "C:\Services\DerivCTraderSignalScraper\logs\*.txt" -Tail 50
 Get-Content "C:\Services\DerivCTraderTradeExecutor\logs\*.txt" -Tail 50
 ```
 
-### Session Files Lost
+### Session Files Lost or Need Update
 
-If Telegram sessions are lost (requiring re-authentication):
+If Telegram sessions need to be regenerated:
+
+1. Run SignalScraper locally and re-authenticate
+2. Upload new `WTelegram.session` to Azure DevOps Secure Files:
+   - Go to Azure DevOps → Library → Secure files
+   - Delete old `WTelegram.session`
+   - Upload new one from: `src\DerivCTrader.SignalScraper\bin\WTelegram.session`
+3. Next deployment will include the updated session file
+
+**Fallback (check VPS backup):**
 ```powershell
-# Check backup
+# Check backup on VPS
 Get-ChildItem "C:\Services\DerivCTraderSignalScraper\session_backup\*.session"
 
-# Restore from backup
+# Restore from backup if needed
 Copy-Item "C:\Services\DerivCTraderSignalScraper\session_backup\*.session" -Destination "C:\Services\DerivCTraderSignalScraper\"
 ```
 
@@ -159,17 +165,30 @@ Renew access token:
 
 ## Session File Preservation
 
-**How it works:**
-1. Before deployment, pipeline backs up all `*.session` files to `session_backup\`
-2. Old binaries are deleted, but `session_backup\`, `logs\`, and `charts\` preserved
-3. New binaries copied
-4. Session files restored from backup
+**How it works (Multi-layer protection):**
+
+1. **Azure DevOps Secure Files (Primary Source)**
+   - Session file downloaded from Secure Files during build
+   - Included in artifact automatically
+   - Deployed to VPS with each release
+
+2. **VPS Backup (Fallback)**
+   - Before deployment, pipeline backs up all `*.session` files to `session_backup\`
+   - Old binaries are deleted, but `session_backup\`, `logs\`, and `charts\` preserved
+   - New binaries copied (including session from artifact)
+   - If artifact doesn't have session file, backup is restored
 
 **Expected session files:**
-- `DerivCTrader.session` (Telegram account 1)
-- `DerivCTrader2.session` (Telegram account 2)
+- `WTelegram.session` (Primary Telegram session)
 
 These files contain WTelegram authentication state. **Never commit to git**.
+
+**Updating Session Files:**
+1. Re-authenticate locally by running SignalScraper
+2. Go to Azure DevOps → Library → Secure files
+3. Delete old `WTelegram.session`
+4. Upload new `WTelegram.session` from `src\DerivCTrader.SignalScraper\bin\`
+5. Next deployment will use the updated session
 
 ## Manual Deployment (If Needed)
 

@@ -18,7 +18,8 @@ public class SyntheticIndicesParser : ISignalParser
     private static readonly HashSet<string> SupportedChannelIds = new(StringComparer.Ordinal)
     {
         "-1003204276456", // SyntheticIndicesTrader (legacy)
-        "-1003375573206"  // SyntheticIndicesTrader (new)
+        "-1003375573206", // SyntheticIndicesTrader (new)
+        "-1003046812685"  // VIP KNIGHTS
     };
 
     public SyntheticIndicesParser(ILogger<SyntheticIndicesParser> logger)
@@ -41,7 +42,9 @@ public class SyntheticIndicesParser : ISignalParser
             _logger.LogInformation("SyntheticIndicesParser: Starting parse attempt");
             _logger.LogInformation("SyntheticIndicesParser: Message: {Message}", message);
 
-            var parsed = TryParseZoneSignal(message, providerChannelId) ?? TryParseMarketSignal(message, providerChannelId);
+            var parsed = TryParseZoneSignal(message, providerChannelId)
+                      ?? TryParseVipKnightsSignal(message, providerChannelId)
+                      ?? TryParseMarketSignal(message, providerChannelId);
             if (parsed == null)
             {
                 _logger.LogWarning("SyntheticIndicesParser: No supported pattern matched");
@@ -121,6 +124,111 @@ public class SyntheticIndicesParser : ISignalParser
             SignalType = SignalType.Text,
             ReceivedAt = DateTime.UtcNow
         };
+    }
+
+    private ParsedSignal? TryParseVipKnightsSignal(string message, string providerChannelId)
+    {
+        // VIP KNIGHTS format:
+        // SELL VIX50(1S)
+        // @ 229914.40
+        // Sl 231414.20
+        // To 226500.00      <- TP1
+        // Tp2 223500.00
+        // Tp3 220500.00
+        // Tp4 217500.00
+        // Lotsize 0.025 (0.05)
+
+        // Pattern: Direction + Asset (VIX/VOLATILITY/BOOM/CRASH variants)
+        var pattern = @"\b(BUY|SELL)\s+(VIX|VOLATILITY|BOOM|CRASH)\s*(\d+)\s*(?:\((\d+)s?\))?";
+        var match = Regex.Match(message, pattern, RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        if (!match.Success)
+            return null;
+
+        var direction = match.Groups[1].Value.Equals("BUY", StringComparison.OrdinalIgnoreCase)
+            ? TradeDirection.Buy
+            : TradeDirection.Sell;
+
+        // Build asset name: "Volatility 50 1s" or "Volatility 50"
+        var assetFamily = match.Groups[2].Value.ToUpperInvariant();
+        var assetNumber = match.Groups[3].Value;
+        var assetSuffix = match.Groups[4].Success ? $" {match.Groups[4].Value}s" : "";
+
+        // Normalize VIX -> Volatility
+        if (assetFamily == "VIX")
+            assetFamily = "Volatility";
+        else
+            assetFamily = char.ToUpper(assetFamily[0]) + assetFamily.Substring(1).ToLower();
+
+        var asset = $"{assetFamily} {assetNumber}{assetSuffix}".Trim();
+
+        // Extract entry price: "@ 229914.40"
+        var entryMatch = Regex.Match(message, @"@\s*([\d.]+)", RegexOptions.IgnoreCase);
+        decimal? entry = entryMatch.Success
+            ? decimal.Parse(entryMatch.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)
+            : null;
+
+        // Extract TPs - VIP KNIGHTS uses "To" for TP1
+        var (tp1, tp2, tp3, tp4) = ExtractTakeProfitsVipKnights(message);
+        var sl = ExtractStopLoss(message);
+
+        // Fallback if TP1/SL missing
+        decimal pointOffset = 200m;
+        if (!tp1.HasValue && entry.HasValue)
+            tp1 = direction == TradeDirection.Buy ? entry + pointOffset : entry - pointOffset;
+        if (!sl.HasValue && entry.HasValue)
+            sl = direction == TradeDirection.Buy ? entry - pointOffset : entry + pointOffset;
+
+        return new ParsedSignal
+        {
+            ProviderChannelId = providerChannelId,
+            ProviderName = "VIP KNIGHTS",
+            Asset = asset,
+            Direction = direction,
+            EntryPrice = entry,
+            TakeProfit = tp1,
+            TakeProfit2 = tp2,
+            TakeProfit3 = tp3,
+            TakeProfit4 = tp4,
+            StopLoss = sl,
+            SignalType = SignalType.Text,
+            ReceivedAt = DateTime.UtcNow
+        };
+    }
+
+    private static (decimal? tp1, decimal? tp2, decimal? tp3, decimal? tp4) ExtractTakeProfitsVipKnights(string message)
+    {
+        decimal? tp1 = null;
+        decimal? tp2 = null;
+        decimal? tp3 = null;
+        decimal? tp4 = null;
+
+        // Match "To" for TP1 (VIP KNIGHTS style)
+        var toMatch = Regex.Match(message, @"\bTo\s+([\d.]+)", RegexOptions.IgnoreCase);
+        if (toMatch.Success)
+            tp1 = decimal.Parse(toMatch.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+
+        // Also check standard TP1 format as fallback
+        if (!tp1.HasValue)
+        {
+            var tp1Match = Regex.Match(message, @"\bTP\s*1\b\s*[:.\-@]?\s*([\d.]+)", RegexOptions.IgnoreCase);
+            if (tp1Match.Success)
+                tp1 = decimal.Parse(tp1Match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        // Extract TP2, TP3, TP4
+        var tp2Match = Regex.Match(message, @"\bTp?\s*2\b\s*[:.\-@]?\s*([\d.]+)", RegexOptions.IgnoreCase);
+        if (tp2Match.Success)
+            tp2 = decimal.Parse(tp2Match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+
+        var tp3Match = Regex.Match(message, @"\bTp?\s*3\b\s*[:.\-@]?\s*([\d.]+)", RegexOptions.IgnoreCase);
+        if (tp3Match.Success)
+            tp3 = decimal.Parse(tp3Match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+
+        var tp4Match = Regex.Match(message, @"\bTp?\s*4\b\s*[:.\-@]?\s*([\d.]+)", RegexOptions.IgnoreCase);
+        if (tp4Match.Success)
+            tp4 = decimal.Parse(tp4Match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+
+        return (tp1, tp2, tp3, tp4);
     }
 
     private ParsedSignal? TryParseMarketSignal(string message, string providerChannelId)
@@ -302,39 +410,6 @@ public class SyntheticIndicesParser : ISignalParser
             ? decimal.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)
             : null;
     }
-
-    private string ConvertToDerivAsset(string rawAsset)
-    {
-        // Map signal names to Deriv asset names
-        // You may need to adjust these mappings based on actual Deriv asset names
-
-        var normalized = rawAsset.ToUpper().Replace(" ", "");
-
-        if (normalized.Contains("VOLATILITY75"))
-            return "Volatility 75 (1s) Index"; // Deriv uses this format
-
-        if (normalized.Contains("VOLATILITY50"))
-            return "Volatility 50 (1s) Index";
-
-        if (normalized.Contains("VOLATILITY100"))
-            return "Volatility 100 (1s) Index";
-
-        if (normalized.Contains("VOLATILITY10"))
-            return "Volatility 10 (1s) Index";
-
-        if (normalized.Contains("CRASH500"))
-            return "Crash 500 Index";
-
-        if (normalized.Contains("CRASH1000"))
-            return "Crash 1000 Index";
-
-        if (normalized.Contains("BOOM500"))
-            return "Boom 500 Index";
-
-        if (normalized.Contains("BOOM1000"))
-            return "Boom 1000 Index";
-
-        // Return as-is if no mapping found
-        return rawAsset;
-    }
 }
+
+
