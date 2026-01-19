@@ -26,4 +26,21 @@ public class ParsedSignal
     public string? Timeframe { get; set; }  // e.g., "H4", "1H", "15M"
     public bool Processed { get; set; } = false;  // Add this
     public DateTime? ProcessedAt { get; set; }  // Add this
+    
+    /// <summary>
+    /// Telegram message ID from the original signal - used for reply threading
+    /// </summary>
+    public int? TelegramMessageId { get; set; }
+
+    /// <summary>
+    /// Telegram message ID for the notification sent when signal was received
+    /// Used to thread order/fill/close notifications
+    /// </summary>
+    public int? NotificationMessageId { get; set; }
+
+    /// <summary>
+    /// Scheduled execution time in UTC for providers with pre-scheduled signals (e.g., CMFLIX).
+    /// When set, the signal should be executed at this specific time rather than immediately.
+    /// </summary>
+    public DateTime? ScheduledAtUtc { get; set; }
 }
