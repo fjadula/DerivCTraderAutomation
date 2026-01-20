@@ -51,6 +51,14 @@ System.Exception: Deriv execution failed: Trading is not offered for this asset.
 2. Added missing minor pairs from Deriv's available list (AUD/CAD, EUR/NZD, USD/MXN, USD/PLN, etc.)
 3. Fixed fallback logic to format 6-letter pairs with slash: EURUSD → EUR/USD
 4. Updated `IsForexPair()` to check for slash format instead of "frx" prefix
+5. **Follow-up fix:** Added lowercase conversion for forex symbols (EUR/USD → eur/usd) in API calls
+6. **Follow-up fix:** Enhanced error logging to capture full Deriv error details (code, message, details)
+
+**Additional Fixes (Commit 1f0c528):**
+- Deriv API expects lowercase forex symbols: `eur/usd` not `EUR/USD`
+- Volatility indices remain uppercase: `R_10`, `1HZ100V`
+- Added conditional formatting: forex pairs → lowercase, volatility indices → unchanged
+- Enhanced error logging in proposal failures for better diagnostics
 
 **Impact:** Binary options now execute successfully for all forex pairs supported by Deriv.
 
