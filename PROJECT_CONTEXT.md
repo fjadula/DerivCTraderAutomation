@@ -1,6 +1,6 @@
 # DerivCTrader Automation - Project Context
 
-**Last Updated:** 2026-01-19
+**Last Updated:** 2026-01-20
 
 This document is maintained by AI assistants to provide continuity across sessions when context windows fill up.
 
@@ -18,6 +18,69 @@ The project is a **trading automation system** that:
 7. **NEW:** Deriv WebSocket connection resilience with auto-restart
 
 ### Recent Major Changes (Dec 2025 - Jan 2026)
+
+#### Completed Jan 20, 2026 - Fixed Deriv Auto-Reconnection Authorization Bug
+
+**Summary:** Fixed critical bug where DerivClient auto-reconnection would not re-authorize, causing "Not authorized with Deriv" errors.
+
+**Problem:**
+- Binary option placement failed with: `System.InvalidOperationException: Not authorized with Deriv`
+- Auto-reconnection logic successfully reconnected WebSocket but skipped re-authorization
+- Root cause: Property name typo in line 468 - checking `_config.ApiToken` instead of `_config.Token`
+
+**Error Observed:**
+```
+2026-01-20 00:00:04 [ERR] Error placing binary option
+System.InvalidOperationException: Not authorized with Deriv
+   at DerivCTrader.Infrastructure.Deriv.DerivClient.PlaceBinaryOptionAsync
+```
+
+**File Modified:** [Derivclient.cs:468](src/DerivCTrader.Infrastructure/Deriv/Derivclient.cs#L468)
+
+**Fix:**
+```csharp
+// Before (line 468) - Wrong property name
+if (!string.IsNullOrEmpty(_config.ApiToken))  // ❌ Property doesn't exist
+
+// After - Correct property name
+if (!string.IsNullOrEmpty(_config.Token))  // ✅ Matches DerivConfig.Token
+```
+
+**Root Cause Analysis:**
+- DerivConfig class has property `Token` (not `ApiToken`)
+- Condition was always false, so AuthorizeAsync was never called during auto-reconnection
+- WebSocket would reconnect successfully but remain unauthorized
+- PlaceBinaryOptionAsync checks `IsAuthorized` before making API calls → throws exception
+
+**Impact:** Auto-reconnection now properly re-authorizes with Deriv API, preventing binary option placement failures after WebSocket disconnections.
+
+#### In Progress Jan 19, 2026 - Asset Name Data Quality Issue
+
+**Summary:** Investigating production error where Asset column contains "XAUUSD (Gold) Sell" instead of just "XAUUSD", causing cTrader symbol lookup failures.
+
+**Error Observed:**
+```
+2026-01-19 17:36:00 [ERR] Failed to get symbol ID for XAUUSD (Gold) Sell
+System.ArgumentException: Unknown symbol: XAUUSD (Gold) Sell
+   at CTraderSymbolService.GetSymbolId(String assetName) line 398
+   at CTraderOrderManager.GetSymbolId(String asset) line 1305
+```
+
+**Investigation Findings:**
+- All current parsers (AFXGoldParser, GoldSignalParser1, GoldUnifiedParser) correctly set `Asset = "XAUUSD"`
+- CTraderOrderManager, CTraderPendingOrderService, BinaryExecutionService all use signal.Asset directly without modification
+- SqlServerTradeRepository.SaveParsedSignalAsync uses NormalizeAssetForStorage which only handles length truncation, not content changes
+- Issue appears to be corrupted data in ParsedSignalsQueue table from old parser bug or manual entry
+
+**Diagnostic Tools Created:**
+- [diagnose-asset-issue.sql](diagnose-asset-issue.sql) - Query to find signals with malformed Asset values
+- [fix-asset-names.sql](fix-asset-names.sql) - Cleanup script to fix Asset names by removing extra text
+
+**Next Steps:**
+1. Run diagnose-asset-issue.sql to identify affected records
+2. Review results to confirm scope of issue
+3. Run fix-asset-names.sql to clean up data
+4. Consider adding validation to SaveParsedSignalAsync to reject malformed Asset values
 
 #### Completed Jan 19, 2026 - DerivClient Auto-Reconnection on Aborted State
 

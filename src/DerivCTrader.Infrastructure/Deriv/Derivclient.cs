@@ -465,7 +465,7 @@ public class DerivClient : IDerivClient, IDisposable
                         await ConnectAsync(cancellationToken);
 
                         // Re-authorize if we have credentials
-                        if (!string.IsNullOrEmpty(_config.ApiToken))
+                        if (!string.IsNullOrEmpty(_config.Token))
                         {
                             await AuthorizeAsync(cancellationToken);
                         }
