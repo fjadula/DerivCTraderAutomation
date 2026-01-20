@@ -19,6 +19,41 @@ The project is a **trading automation system** that:
 
 ### Recent Major Changes (Dec 2025 - Jan 2026)
 
+#### Completed Jan 20, 2026 - Fixed Deriv Forex Symbol Mapping for Binary Options
+
+**Summary:** Fixed incorrect forex symbol format causing "Trading is not offered for this asset" errors on Deriv.
+
+**Problem:**
+- Binary option placement failed with: `Deriv execution failed: Trading is not offered for this asset`
+- Error occurred for forex pairs like EURUSD, GBPUSD, etc.
+- Root cause: Asset mapper was using "frx" prefix format (e.g., "frxEURUSD") instead of slash format (e.g., "EUR/USD")
+
+**Error Observed:**
+```
+2026-01-20 14:57:31 [ERR] Failed to process queue entry 15
+System.Exception: Deriv execution failed: Trading is not offered for this asset.
+   at DerivBinaryExecutorService.ProcessQueueEntryAsync
+```
+
+**File Modified:** [Derivmodels.cs](src/DerivCTrader.Infrastructure/Deriv/Derivmodels.cs)
+
+**Fix:**
+```csharp
+// Before - Wrong format for binary options
+["EURUSD"] = "frxEURUSD",  // ❌ This is for CFD/spot trading
+
+// After - Correct format for binary options
+["EURUSD"] = "EUR/USD",    // ✅ Binary options use slash format
+```
+
+**Changes Made:**
+1. Updated all forex pair mappings to use slash format (EUR/USD, GBP/USD, etc.)
+2. Added missing minor pairs from Deriv's available list (AUD/CAD, EUR/NZD, USD/MXN, USD/PLN, etc.)
+3. Fixed fallback logic to format 6-letter pairs with slash: EURUSD → EUR/USD
+4. Updated `IsForexPair()` to check for slash format instead of "frx" prefix
+
+**Impact:** Binary options now execute successfully for all forex pairs supported by Deriv.
+
 #### Completed Jan 20, 2026 - Fixed Deriv Auto-Reconnection Authorization Bug
 
 **Summary:** Fixed critical bug where DerivClient auto-reconnection would not re-authorize, causing "Not authorized with Deriv" errors.

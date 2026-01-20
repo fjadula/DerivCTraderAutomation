@@ -47,35 +47,61 @@ public static class DerivAssetMapper
 {
     private static readonly Dictionary<string, string> AssetMap = new(StringComparer.OrdinalIgnoreCase)
     {
-        // Major Forex Pairs (both with and without slashes)
-        ["EURUSD"] = "frxEURUSD",
-        ["EUR/USD"] = "frxEURUSD",
-        ["GBPUSD"] = "frxGBPUSD",
-        ["GBP/USD"] = "frxGBPUSD",
-        ["USDJPY"] = "frxUSDJPY",
-        ["USD/JPY"] = "frxUSDJPY",
-        ["AUDUSD"] = "frxAUDUSD",
-        ["AUD/USD"] = "frxAUDUSD",
-        ["USDCAD"] = "frxUSDCAD",
-        ["USD/CAD"] = "frxUSDCAD",
-        ["USDCHF"] = "frxUSDCHF",
-        ["USD/CHF"] = "frxUSDCHF",
-        ["NZDUSD"] = "frxNZDUSD",
-        ["NZD/USD"] = "frxNZDUSD",
+        // Major Forex Pairs (binary options use slash format)
+        ["EURUSD"] = "EUR/USD",
+        ["EUR/USD"] = "EUR/USD",
+        ["GBPUSD"] = "GBP/USD",
+        ["GBP/USD"] = "GBP/USD",
+        ["USDJPY"] = "USD/JPY",
+        ["USD/JPY"] = "USD/JPY",
+        ["AUDUSD"] = "AUD/USD",
+        ["AUD/USD"] = "AUD/USD",
+        ["USDCAD"] = "USD/CAD",
+        ["USD/CAD"] = "USD/CAD",
+        ["USDCHF"] = "USD/CHF",
+        ["USD/CHF"] = "USD/CHF",
+        ["NZDUSD"] = "NZD/USD",
+        ["NZD/USD"] = "NZD/USD",
 
-        // Cross Pairs (both with and without slashes)
-        ["EURJPY"] = "frxEURJPY",
-        ["EUR/JPY"] = "frxEURJPY",
-        ["EURGBP"] = "frxEURGBP",
-        ["EUR/GBP"] = "frxEURGBP",
-        ["GBPJPY"] = "frxGBPJPY",
-        ["GBP/JPY"] = "frxGBPJPY",
-        ["AUDJPY"] = "frxAUDJPY",
-        ["AUD/JPY"] = "frxAUDJPY",
-        ["EURAUD"] = "frxEURAUD",
-        ["EUR/AUD"] = "frxEURAUD",
-        ["EURCAD"] = "frxEURCAD",
-        ["EUR/CAD"] = "frxEURCAD",
+        // Cross Pairs (binary options use slash format)
+        ["EURJPY"] = "EUR/JPY",
+        ["EUR/JPY"] = "EUR/JPY",
+        ["EURGBP"] = "EUR/GBP",
+        ["EUR/GBP"] = "EUR/GBP",
+        ["GBPJPY"] = "GBP/JPY",
+        ["GBP/JPY"] = "GBP/JPY",
+        ["AUDJPY"] = "AUD/JPY",
+        ["AUD/JPY"] = "AUD/JPY",
+        ["EURAUD"] = "EUR/AUD",
+        ["EUR/AUD"] = "EUR/AUD",
+        ["EURCAD"] = "EUR/CAD",
+        ["EUR/CAD"] = "EUR/CAD",
+        ["EURCHF"] = "EUR/CHF",
+        ["EUR/CHF"] = "EUR/CHF",
+        ["GBPAUD"] = "GBP/AUD",
+        ["GBP/AUD"] = "GBP/AUD",
+
+        // Minor Pairs from user's list
+        ["AUDCAD"] = "AUD/CAD",
+        ["AUD/CAD"] = "AUD/CAD",
+        ["AUDCHF"] = "AUD/CHF",
+        ["AUD/CHF"] = "AUD/CHF",
+        ["AUDNZD"] = "AUD/NZD",
+        ["AUD/NZD"] = "AUD/NZD",
+        ["EURNZD"] = "EUR/NZD",
+        ["EUR/NZD"] = "EUR/NZD",
+        ["GBPCAD"] = "GBP/CAD",
+        ["GBP/CAD"] = "GBP/CAD",
+        ["GBPCHF"] = "GBP/CHF",
+        ["GBP/CHF"] = "GBP/CHF",
+        ["GBPNZD"] = "GBP/NZD",
+        ["GBP/NZD"] = "GBP/NZD",
+        ["NZDJPY"] = "NZD/JPY",
+        ["NZD/JPY"] = "NZD/JPY",
+        ["USDMXN"] = "USD/MXN",
+        ["USD/MXN"] = "USD/MXN",
+        ["USDPLN"] = "USD/PLN",
+        ["USD/PLN"] = "USD/PLN",
 
         // Volatility Indices (various naming conventions)
         ["Volatility 10 Index"] = "R_10",
@@ -219,18 +245,16 @@ public static class DerivAssetMapper
 
         // Fallback: Remove slashes/spaces and check if it's a forex pair
         string cleanedAsset = asset.Replace("/", "").Replace(" ", "").Trim().ToUpper();
-        
-        // If cleaned asset looks like a forex pair (6-7 uppercase letters)
-        // and doesn't have a prefix, add frx
-        if (cleanedAsset.Length >= 6 && cleanedAsset.Length <= 7 && 
-            cleanedAsset.All(char.IsLetter) &&
-            !cleanedAsset.StartsWith("frx", StringComparison.OrdinalIgnoreCase))
+
+        // If cleaned asset looks like a forex pair (6 uppercase letters)
+        // format it with slash: EURUSD -> EUR/USD
+        if (cleanedAsset.Length == 6 && cleanedAsset.All(char.IsLetter))
         {
-            return $"frx{cleanedAsset}";
+            return $"{cleanedAsset.Substring(0, 3)}/{cleanedAsset.Substring(3, 3)}";
         }
 
-        // If no match, return cleaned asset
-        return cleanedAsset;
+        // If no match, return as-is (might be a volatility index or other asset)
+        return asset.Trim();
     }
 
     /// <summary>
@@ -239,7 +263,11 @@ public static class DerivAssetMapper
     public static bool IsForexPair(string asset)
     {
         var derivSymbol = ToDerivSymbol(asset);
-        return derivSymbol.StartsWith("frx", StringComparison.OrdinalIgnoreCase);
+        // Forex pairs use slash format: EUR/USD, GBP/USD, etc.
+        return derivSymbol.Contains("/") &&
+               derivSymbol.Length >= 7 &&
+               derivSymbol.Length <= 7 &&
+               !derivSymbol.StartsWith("R_", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
