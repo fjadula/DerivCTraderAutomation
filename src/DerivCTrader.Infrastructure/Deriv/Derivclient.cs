@@ -170,6 +170,12 @@ public class DerivClient : IDerivClient, IDisposable
                 throw new InvalidOperationException("Not authorized with Deriv");
 
             // Step 1: Get proposal (price quote)
+            // Note: Deriv API expects lowercase symbols for forex pairs (eur/usd),
+            // but uppercase for volatility indices (R_10, 1HZ100V)
+            var symbolForApi = derivSymbol.Contains("/")
+                ? derivSymbol.ToLowerInvariant()  // Forex: EUR/USD -> eur/usd
+                : derivSymbol;  // Keep volatility indices as-is: R_10, 1HZ100V
+
             var proposalReq = new
             {
                 proposal = 1,
@@ -179,7 +185,7 @@ public class DerivClient : IDerivClient, IDisposable
                 currency = "USD",
                 duration = durationMinutes,
                 duration_unit = "m",
-                symbol = derivSymbol,
+                symbol = symbolForApi,
                 req_id = _requestId++
             };
 
@@ -188,12 +194,18 @@ public class DerivClient : IDerivClient, IDisposable
             if (proposalRes["error"] != null)
             {
                 var error = proposalRes?["error"];
-                _logger.LogError("Proposal failed: {Message}", error?["message"] ?? "Unknown error");
+                var errorMsg = error?["message"]?.ToString();
+                var errorCode = error?["code"]?.ToString();
+                var errorDetails = error?["details"]?.ToString();
+
+                _logger.LogError("Proposal failed for symbol {Symbol}: Code={Code}, Message={Message}, Details={Details}, FullError={FullError}",
+                    derivSymbol, errorCode, errorMsg, errorDetails, error?.ToString());
+
                 return new DerivTradeResult
                 {
                     Success = false,
-                    ErrorMessage = error?["message"]?.ToString(),
-                    ErrorCode = error?["code"]?.ToString()
+                    ErrorMessage = errorMsg ?? errorDetails ?? "Unknown error",
+                    ErrorCode = errorCode
                 };
             }
 
