@@ -47,61 +47,66 @@ public static class DerivAssetMapper
 {
     private static readonly Dictionary<string, string> AssetMap = new(StringComparer.OrdinalIgnoreCase)
     {
-        // Major Forex Pairs (binary options use slash format)
-        ["EURUSD"] = "EUR/USD",
-        ["EUR/USD"] = "EUR/USD",
-        ["GBPUSD"] = "GBP/USD",
-        ["GBP/USD"] = "GBP/USD",
-        ["USDJPY"] = "USD/JPY",
-        ["USD/JPY"] = "USD/JPY",
-        ["AUDUSD"] = "AUD/USD",
-        ["AUD/USD"] = "AUD/USD",
-        ["USDCAD"] = "USD/CAD",
-        ["USD/CAD"] = "USD/CAD",
-        ["USDCHF"] = "USD/CHF",
-        ["USD/CHF"] = "USD/CHF",
-        ["NZDUSD"] = "NZD/USD",
-        ["NZD/USD"] = "NZD/USD",
+        // ========================================
+        // FOREX PAIRS - ONLY these 25 pairs are available on Deriv for binary options
+        // Verified: January 2026
+        // Format: frx prefix (e.g., frxEURUSD)
+        // DO NOT add pairs not in this list - they will fail on Deriv API
+        // ========================================
 
-        // Cross Pairs (binary options use slash format)
-        ["EURJPY"] = "EUR/JPY",
-        ["EUR/JPY"] = "EUR/JPY",
-        ["EURGBP"] = "EUR/GBP",
-        ["EUR/GBP"] = "EUR/GBP",
-        ["GBPJPY"] = "GBP/JPY",
-        ["GBP/JPY"] = "GBP/JPY",
-        ["AUDJPY"] = "AUD/JPY",
-        ["AUD/JPY"] = "AUD/JPY",
-        ["EURAUD"] = "EUR/AUD",
-        ["EUR/AUD"] = "EUR/AUD",
-        ["EURCAD"] = "EUR/CAD",
-        ["EUR/CAD"] = "EUR/CAD",
-        ["EURCHF"] = "EUR/CHF",
-        ["EUR/CHF"] = "EUR/CHF",
-        ["GBPAUD"] = "GBP/AUD",
-        ["GBP/AUD"] = "GBP/AUD",
+        // Major Pairs (14 pairs)
+        ["AUDJPY"] = "frxAUDJPY",       // AUD/JPY
+        ["AUD/JPY"] = "frxAUDJPY",
+        ["AUDUSD"] = "frxAUDUSD",       // AUD/USD
+        ["AUD/USD"] = "frxAUDUSD",
+        ["EURAUD"] = "frxEURAUD",       // EUR/AUD
+        ["EUR/AUD"] = "frxEURAUD",
+        ["EURCAD"] = "frxEURCAD",       // EUR/CAD
+        ["EUR/CAD"] = "frxEURCAD",
+        ["EURCHF"] = "frxEURCHF",       // EUR/CHF
+        ["EUR/CHF"] = "frxEURCHF",
+        ["EURGBP"] = "frxEURGBP",       // EUR/GBP
+        ["EUR/GBP"] = "frxEURGBP",
+        ["EURJPY"] = "frxEURJPY",       // EUR/JPY
+        ["EUR/JPY"] = "frxEURJPY",
+        ["EURUSD"] = "frxEURUSD",       // EUR/USD
+        ["EUR/USD"] = "frxEURUSD",
+        ["GBPAUD"] = "frxGBPAUD",       // GBP/AUD
+        ["GBP/AUD"] = "frxGBPAUD",
+        ["GBPJPY"] = "frxGBPJPY",       // GBP/JPY
+        ["GBP/JPY"] = "frxGBPJPY",
+        ["GBPUSD"] = "frxGBPUSD",       // GBP/USD
+        ["GBP/USD"] = "frxGBPUSD",
+        ["USDCAD"] = "frxUSDCAD",       // USD/CAD
+        ["USD/CAD"] = "frxUSDCAD",
+        ["USDCHF"] = "frxUSDCHF",       // USD/CHF
+        ["USD/CHF"] = "frxUSDCHF",
+        ["USDJPY"] = "frxUSDJPY",       // USD/JPY
+        ["USD/JPY"] = "frxUSDJPY",
 
-        // Minor Pairs from user's list
-        ["AUDCAD"] = "AUD/CAD",
-        ["AUD/CAD"] = "AUD/CAD",
-        ["AUDCHF"] = "AUD/CHF",
-        ["AUD/CHF"] = "AUD/CHF",
-        ["AUDNZD"] = "AUD/NZD",
-        ["AUD/NZD"] = "AUD/NZD",
-        ["EURNZD"] = "EUR/NZD",
-        ["EUR/NZD"] = "EUR/NZD",
-        ["GBPCAD"] = "GBP/CAD",
-        ["GBP/CAD"] = "GBP/CAD",
-        ["GBPCHF"] = "GBP/CHF",
-        ["GBP/CHF"] = "GBP/CHF",
-        ["GBPNZD"] = "GBP/NZD",
-        ["GBP/NZD"] = "GBP/NZD",
-        ["NZDJPY"] = "NZD/JPY",
-        ["NZD/JPY"] = "NZD/JPY",
-        ["USDMXN"] = "USD/MXN",
-        ["USD/MXN"] = "USD/MXN",
-        ["USDPLN"] = "USD/PLN",
-        ["USD/PLN"] = "USD/PLN",
+        // Minor Pairs (11 pairs)
+        ["AUDCAD"] = "frxAUDCAD",       // AUD/CAD
+        ["AUD/CAD"] = "frxAUDCAD",
+        ["AUDCHF"] = "frxAUDCHF",       // AUD/CHF
+        ["AUD/CHF"] = "frxAUDCHF",
+        ["AUDNZD"] = "frxAUDNZD",       // AUD/NZD
+        ["AUD/NZD"] = "frxAUDNZD",
+        ["EURNZD"] = "frxEURNZD",       // EUR/NZD
+        ["EUR/NZD"] = "frxEURNZD",
+        ["GBPCAD"] = "frxGBPCAD",       // GBP/CAD
+        ["GBP/CAD"] = "frxGBPCAD",
+        ["GBPCHF"] = "frxGBPCHF",       // GBP/CHF
+        ["GBP/CHF"] = "frxGBPCHF",
+        ["GBPNZD"] = "frxGBPNZD",       // GBP/NZD
+        ["GBP/NZD"] = "frxGBPNZD",
+        ["NZDJPY"] = "frxNZDJPY",       // NZD/JPY
+        ["NZD/JPY"] = "frxNZDJPY",
+        ["NZDUSD"] = "frxNZDUSD",       // NZD/USD
+        ["NZD/USD"] = "frxNZDUSD",
+        ["USDMXN"] = "frxUSDMXN",       // USD/MXN
+        ["USD/MXN"] = "frxUSDMXN",
+        ["USDPLN"] = "frxUSDPLN",       // USD/PLN
+        ["USD/PLN"] = "frxUSDPLN",
 
         // Volatility Indices (various naming conventions)
         ["Volatility 10 Index"] = "R_10",
@@ -247,10 +252,10 @@ public static class DerivAssetMapper
         string cleanedAsset = asset.Replace("/", "").Replace(" ", "").Trim().ToUpper();
 
         // If cleaned asset looks like a forex pair (6 uppercase letters)
-        // format it with slash: EURUSD -> EUR/USD
+        // format it with frx prefix: EURUSD -> frxEURUSD
         if (cleanedAsset.Length == 6 && cleanedAsset.All(char.IsLetter))
         {
-            return $"{cleanedAsset.Substring(0, 3)}/{cleanedAsset.Substring(3, 3)}";
+            return $"frx{cleanedAsset}";
         }
 
         // If no match, return as-is (might be a volatility index or other asset)
@@ -263,11 +268,8 @@ public static class DerivAssetMapper
     public static bool IsForexPair(string asset)
     {
         var derivSymbol = ToDerivSymbol(asset);
-        // Forex pairs use slash format: EUR/USD, GBP/USD, etc.
-        return derivSymbol.Contains("/") &&
-               derivSymbol.Length >= 7 &&
-               derivSymbol.Length <= 7 &&
-               !derivSymbol.StartsWith("R_", StringComparison.OrdinalIgnoreCase);
+        // Forex pairs use frx prefix: frxEURUSD, frxGBPUSD, etc.
+        return derivSymbol.StartsWith("frx", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

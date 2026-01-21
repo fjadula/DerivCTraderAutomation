@@ -170,12 +170,7 @@ public class DerivClient : IDerivClient, IDisposable
                 throw new InvalidOperationException("Not authorized with Deriv");
 
             // Step 1: Get proposal (price quote)
-            // Note: Deriv API expects lowercase symbols for forex pairs (eur/usd),
-            // but uppercase for volatility indices (R_10, 1HZ100V)
-            var symbolForApi = derivSymbol.Contains("/")
-                ? derivSymbol.ToLowerInvariant()  // Forex: EUR/USD -> eur/usd
-                : derivSymbol;  // Keep volatility indices as-is: R_10, 1HZ100V
-
+            // Forex pairs use frx prefix (frxEURUSD), volatility indices use R_ or 1HZ prefix
             var proposalReq = new
             {
                 proposal = 1,
@@ -185,7 +180,7 @@ public class DerivClient : IDerivClient, IDisposable
                 currency = "USD",
                 duration = durationMinutes,
                 duration_unit = "m",
-                symbol = symbolForApi,
+                symbol = derivSymbol,  // Use as-is: frxGBPNZD, R_10, 1HZ100V
                 req_id = _requestId++
             };
 

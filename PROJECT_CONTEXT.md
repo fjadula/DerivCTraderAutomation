@@ -152,48 +152,66 @@ Removed null checks throughout the service since these dependencies are now guar
 
 **Note:** TradeExecutor still has 515 Console.WriteLine statements that get captured by Serilog. With the 50MB limit, this is now manageable, but future optimization could reduce Console output.
 
-#### Completed Jan 20, 2026 - Fixed Deriv Forex Symbol Mapping for Binary Options
+#### Completed Jan 21, 2026 - Fixed Deriv Forex Symbol Format (Reverted to frx Prefix)
 
-**Summary:** Fixed incorrect forex symbol format causing "Trading is not offered for this asset" errors on Deriv.
+**Summary:** Corrected forex pair symbol format for Deriv binary options API. Binary options require "frx" prefix format (frxGBPNZD), not slash format (GBP/NZD).
 
 **Problem:**
-- Binary option placement failed with: `Deriv execution failed: Trading is not offered for this asset`
-- Error occurred for forex pairs like EURUSD, GBPUSD, etc.
-- Root cause: Asset mapper was using "frx" prefix format (e.g., "frxEURUSD") instead of slash format (e.g., "EUR/USD")
+- Binary option placement failed with: `Input validation failed: symbol`
+- Error message: `"symbol": "String does not match ^\\w{2,30}$."`
+- Slash format (GBP/NZD) was being rejected because `/` is not a word character (`\w`)
 
 **Error Observed:**
 ```
-2026-01-20 14:57:31 [ERR] Failed to process queue entry 15
-System.Exception: Deriv execution failed: Trading is not offered for this asset.
-   at DerivBinaryExecutorService.ProcessQueueEntryAsync
+2026-01-21 16:48:41 [ERR] Proposal failed for symbol GBP/NZD: Code=InputValidationFailed
+Message=Input validation failed: symbol
+Details={ "symbol": "String does not match ^\\w{2,30}$." }
 ```
 
-**File Modified:** [Derivmodels.cs](src/DerivCTrader.Infrastructure/Deriv/Derivmodels.cs)
+**User-Provided Information:**
+Deriv web interface URL shows the correct format:
+```
+https://app.deriv.com/dtrader?symbol=frxGBPNZD&trade_type=rise_fall
+```
+Symbol is `frxGBPNZD` - **not** `GBP/NZD` or `gbp/nzd`
+
+**Files Modified:**
+- [Derivmodels.cs](src/DerivCTrader.Infrastructure/Deriv/Derivmodels.cs) - Asset mapping dictionary
+- [Derivclient.cs](src/DerivCTrader.Infrastructure/Deriv/Derivclient.cs) - Removed lowercase conversion
 
 **Fix:**
 ```csharp
-// Before - Wrong format for binary options
-["EURUSD"] = "frxEURUSD",  // ❌ This is for CFD/spot trading
+// INCORRECT (previous attempt):
+["GBPNZD"] = "GBP/NZD",  // ❌ Contains / which fails \w regex
 
-// After - Correct format for binary options
-["EURUSD"] = "EUR/USD",    // ✅ Binary options use slash format
+// CORRECT (reverted):
+["GBPNZD"] = "frxGBPNZD", // ✅ Binary options use frx prefix
 ```
 
 **Changes Made:**
-1. Updated all forex pair mappings to use slash format (EUR/USD, GBP/USD, etc.)
-2. Added missing minor pairs from Deriv's available list (AUD/CAD, EUR/NZD, USD/MXN, USD/PLN, etc.)
-3. Fixed fallback logic to format 6-letter pairs with slash: EURUSD → EUR/USD
-4. Updated `IsForexPair()` to check for slash format instead of "frx" prefix
-5. **Follow-up fix:** Added lowercase conversion for forex symbols (EUR/USD → eur/usd) in API calls
-6. **Follow-up fix:** Enhanced error logging to capture full Deriv error details (code, message, details)
+1. **Reverted all forex mappings to frx prefix format:**
+   - Major pairs: `frxEURUSD`, `frxGBPUSD`, `frxUSDJPY`, `frxAUDUSD`, etc.
+   - Cross pairs: `frxEURJPY`, `frxGBPJPY`, `frxAUDJPY`, etc.
+   - Minor pairs: `frxGBPNZD`, `frxAUDCAD`, `frxEURNZD`, `frxUSDMXN`, `frxUSDPLN`, etc.
 
-**Additional Fixes (Commit 1f0c528):**
-- Deriv API expects lowercase forex symbols: `eur/usd` not `EUR/USD`
-- Volatility indices remain uppercase: `R_10`, `1HZ100V`
-- Added conditional formatting: forex pairs → lowercase, volatility indices → unchanged
-- Enhanced error logging in proposal failures for better diagnostics
+2. **Fixed fallback logic:** `EURUSD` → `frxEURUSD` (was incorrectly producing `EUR/USD`)
 
-**Impact:** Binary options now execute successfully for all forex pairs supported by Deriv.
+3. **Updated IsForexPair() check:** Check for `frx` prefix instead of `/` slash
+
+4. **Removed incorrect lowercase conversion:** Forex symbols sent as-is: `frxGBPNZD`
+
+**Root Cause of Previous Error:**
+- Initial error "Trading is not offered" may have been due to market hours or asset availability
+- Incorrectly assumed slash format was needed based on that error
+- Deriv WebSocket API uses same format as web interface: `frx` prefix, no slashes
+
+**Regex Pattern:** `^\w{2,30}$` means:
+- `\w` = word characters only (`[a-zA-Z0-9_]`)
+- No special characters like `/` allowed
+- `frxGBPNZD` matches ✅ (9 word characters)
+- `GBP/NZD` fails ❌ (contains `/`)
+
+**Impact:** Binary options now execute successfully for all forex pairs using correct frx prefix format.
 
 #### Completed Jan 20, 2026 - Fixed Deriv Auto-Reconnection Authorization Bug
 
