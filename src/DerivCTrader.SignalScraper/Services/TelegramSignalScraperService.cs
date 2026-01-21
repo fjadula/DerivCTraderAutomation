@@ -17,9 +17,9 @@ public class TelegramSignalScraperService : BackgroundService
     private readonly IConfiguration _configuration;
     private readonly IEnumerable<ISignalParser> _parsers;
     private readonly ITradeRepository _repository;
-    private readonly IDashaTradeRepository? _dashaRepository;
-    private readonly CmflixParser? _cmflixParser;
-    private readonly IzintzikaDerivParser? _izintzikaDerivParser;
+    private readonly IDashaTradeRepository _dashaRepository;
+    private readonly CmflixParser _cmflixParser;
+    private readonly IzintzikaDerivParser _izintzikaDerivParser;
     private Client? _client1;
     private Client? _client2;
     private readonly Dictionary<long, string> _channelMappings;
@@ -42,9 +42,9 @@ public class TelegramSignalScraperService : BackgroundService
         IConfiguration configuration,
         IEnumerable<ISignalParser> parsers,
         ITradeRepository repository,
-        IDashaTradeRepository? dashaRepository = null,
-        CmflixParser? cmflixParser = null,
-        IzintzikaDerivParser? izintzikaDerivParser = null)
+        IDashaTradeRepository dashaRepository,
+        CmflixParser cmflixParser,
+        IzintzikaDerivParser izintzikaDerivParser)
     {
         _logger = logger;
         _configuration = configuration;
@@ -400,7 +400,7 @@ public class TelegramSignalScraperService : BackgroundService
 
                 // 🆕 CMFLIX BATCH SIGNALS - Handle before normal parsers
                 // CMFLIX sends batch scheduled signals that need special handling
-                if (_cmflixParser != null && _cmflixParser.CanParse(providerChannelId, messageText ?? ""))
+                if (_cmflixParser.CanParse(providerChannelId, messageText ?? ""))
                 {
                     _logger.LogInformation("📅 CMFLIX batch signal detected, parsing scheduled signals");
                     Console.WriteLine("📅 CMFLIX batch signal detected");
@@ -438,7 +438,7 @@ public class TelegramSignalScraperService : BackgroundService
 
                 // 🆕 IZINTZIKADERIV BATCH SIGNALS - Handle before normal parsers
                 // IzintzikaDeriv sends multiple entry order signals per message
-                if (_izintzikaDerivParser != null && _izintzikaDerivParser.CanParse(providerChannelId, messageText ?? ""))
+                if (_izintzikaDerivParser.CanParse(providerChannelId, messageText ?? ""))
                 {
                     _logger.LogInformation("📊 IzintzikaDeriv batch signal detected, parsing entry orders");
                     Console.WriteLine("📊 IzintzikaDeriv batch signal detected");
@@ -541,7 +541,7 @@ public class TelegramSignalScraperService : BackgroundService
                     try
                     {
                         // Check if this is a DashaTrade signal for selective martingale routing
-                        if (providerChannelId == DASHA_TRADE_CHANNEL_ID && _dashaRepository != null)
+                        if (providerChannelId == DASHA_TRADE_CHANNEL_ID)
                         {
                             // Route to DashaPendingSignals for selective martingale processing
                             await SaveDashaTradePendingSignalAsync(parsedSignal);
@@ -663,12 +663,6 @@ public class TelegramSignalScraperService : BackgroundService
     /// </summary>
     private async Task SaveDashaTradePendingSignalAsync(ParsedSignal parsedSignal)
     {
-        if (_dashaRepository == null)
-        {
-            _logger.LogWarning("[DashaTrade] Repository not available, cannot save pending signal");
-            return;
-        }
-
         var now = DateTime.UtcNow;
 
         // Parse timeframe to get expiry minutes

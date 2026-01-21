@@ -1,6 +1,6 @@
 # DerivCTrader Automation - Project Context
 
-**Last Updated:** 2026-01-20
+**Last Updated:** 2026-01-21
 
 This document is maintained by AI assistants to provide continuity across sessions when context windows fill up.
 
@@ -18,6 +18,139 @@ The project is a **trading automation system** that:
 7. **NEW:** Deriv WebSocket connection resilience with auto-restart
 
 ### Recent Major Changes (Dec 2025 - Jan 2026)
+
+#### Completed Jan 21, 2026 - Fixed Dasha Trade Dependency Injection Bug
+
+**Summary:** Fixed critical dependency injection issue preventing Dasha Trade signals from being routed to the correct database table.
+
+**Problem:**
+- Dasha Trade signals were not being executed
+- No signals appearing in `DashaPendingSignals` table
+- No trades being placed by `DashaTradeExecutionService`
+
+**Root Cause:**
+In [TelegramSignalScraperService.cs](src/DerivCTrader.SignalScraper/Services/TelegramSignalScraperService.cs), the constructor had **optional parameters with default values**:
+
+```csharp
+// BEFORE - ❌ BROKEN
+public TelegramSignalScraperService(
+    ILogger<TelegramSignalScraperService> logger,
+    IConfiguration configuration,
+    IEnumerable<ISignalParser> parsers,
+    ITradeRepository repository,
+    IDashaTradeRepository? dashaRepository = null,     // ❌ Optional with default
+    CmflixParser? cmflixParser = null,
+    IzintzikaDerivParser? izintzikaDerivParser = null)
+```
+
+.NET Core's dependency injection **doesn't reliably inject optional parameters**. Even though `IDashaTradeRepository` was registered in DI, the optional parameter with `= null` default caused `_dashaRepository` to remain `null`.
+
+This caused the routing logic (line 544) to fail:
+```csharp
+// BROKEN LOGIC
+if (providerChannelId == DASHA_TRADE_CHANNEL_ID && _dashaRepository != null)  // Always false!
+{
+    await SaveDashaTradePendingSignalAsync(parsedSignal);  // Never executed
+}
+else
+{
+    await _repository.SaveParsedSignalAsync(parsedSignal);  // All signals went here
+}
+```
+
+**Result:** All DashaTrade signals were saved to `ParsedSignalsQueue` instead of `DashaPendingSignals`, so `DashaTradeExecutionService` never processed them.
+
+**Fix:**
+Made all constructor parameters **required** (removed `?` and `= null`):
+
+```csharp
+// AFTER - ✅ FIXED
+public TelegramSignalScraperService(
+    ILogger<TelegramSignalScraperService> logger,
+    IConfiguration configuration,
+    IEnumerable<ISignalParser> parsers,
+    ITradeRepository repository,
+    IDashaTradeRepository dashaRepository,        // ✅ Required
+    CmflixParser cmflixParser,                    // ✅ Required
+    IzintzikaDerivParser izintzikaDerivParser)    // ✅ Required
+```
+
+Removed null checks throughout the service since these dependencies are now guaranteed to be injected.
+
+**Files Modified:**
+- [TelegramSignalScraperService.cs](src/DerivCTrader.SignalScraper/Services/TelegramSignalScraperService.cs): Constructor parameters, field declarations, routing logic
+
+**Impact:**
+- Dasha Trade signals now correctly route to `DashaPendingSignals` table
+- `DashaTradeExecutionService` can now process signals and execute selective martingale trades
+- CMFLIX and IzintzikaDeriv parsers also guaranteed to be injected
+
+**Testing Required:**
+1. Deploy updated SignalScraper to VPS
+2. Wait for DashaTrade signal from channel `-1001570351142`
+3. Verify signal appears in `DashaPendingSignals` table (not `ParsedSignalsQueue`)
+4. Verify TradeExecutor fills entry price and evaluates at expiry
+5. Verify trades execute on Deriv when provider loses
+
+#### Completed Jan 20, 2026 - Fixed Logging Configuration Issues
+
+**Summary:** Fixed log file organization and excessive file sizes by correcting log paths, reducing retention, and adding file size limits.
+
+**Problems:**
+1. **Mixed log files**: Both Executor and Scraper writing to each other's log folders
+2. **Excessive file sizes**: TradeExecutor logs growing to 400MB+ per day
+3. **30-day retention**: Keeping too many old log files
+
+**Root Causes:**
+- TradeExecutor appsettings.Production.json had wrong path: `logs/signal-scraper-.log` (should be `logs/tradeexecutor-.log`)
+- No file size limits configured
+- 30-day retention (retainedFileCountLimit: 30) instead of 1 day
+- 515 Console.WriteLine statements in TradeExecutor (all captured by Serilog)
+
+**Files Modified:**
+- [DerivCTrader.TradeExecutor/appsettings.Production.json](src/DerivCTrader.TradeExecutor/appsettings.Production.json)
+- [DerivCTrader.TradeExecutor/Program.cs](src/DerivCTrader.TradeExecutor/Program.cs)
+- [DerivCTrader.SignalScraper/appsettings.Production.json](src/DerivCTrader.SignalScraper/appsettings.Production.json)
+- [DerivCTrader.SignalScraper/Program.cs](src/DerivCTrader.SignalScraper/Program.cs)
+
+**Changes Made:**
+
+1. **Fixed log file paths:**
+```json
+// Executor appsettings.Production.json - BEFORE
+"path": "logs/signal-scraper-.log"  // ❌ Wrong!
+
+// Executor appsettings.Production.json - AFTER
+"path": "logs/tradeexecutor-.log"   // ✅ Correct
+
+// Scraper appsettings.Production.json
+"path": "logs/signalscraper-.log"   // ✅ Already correct, kept consistent
+```
+
+2. **Added retention and size limits:**
+```json
+{
+  "Name": "File",
+  "Args": {
+    "path": "logs/tradeexecutor-.log",
+    "rollingInterval": "Day",
+    "retainedFileCountLimit": 1,          // ✅ Keep only 1 day (was 30)
+    "fileSizeLimitBytes": 52428800,       // ✅ 50MB limit (new)
+    "rollOnFileSizeLimit": true,          // ✅ Roll on size (new)
+    "outputTemplate": "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz}] [{Level:u3}] {Message:lj}{NewLine}{Exception}"
+  }
+}
+```
+
+3. **Updated Program.cs configurations** to match appsettings
+
+**Impact:**
+- ✅ Each service now writes to its own log folder
+- ✅ Log files limited to 50MB maximum (will create .001, .002, etc. when exceeded)
+- ✅ Only current day's logs retained (previous days auto-deleted)
+- ✅ Prevents disk space issues from runaway log growth
+
+**Note:** TradeExecutor still has 515 Console.WriteLine statements that get captured by Serilog. With the 50MB limit, this is now manageable, but future optimization could reduce Console output.
 
 #### Completed Jan 20, 2026 - Fixed Deriv Forex Symbol Mapping for Binary Options
 
