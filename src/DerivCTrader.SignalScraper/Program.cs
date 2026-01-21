@@ -80,7 +80,9 @@ class Program
                 .WriteTo.File(
                     Path.Combine(contentRoot, "logs", "signalscraper-.txt"),
                     rollingInterval: RollingInterval.Day,
-                    retainedFileCountLimit: 30)
+                    retainedFileCountLimit: 1,
+                    fileSizeLimitBytes: 52428800, // 50MB limit
+                    rollOnFileSizeLimit: true)
                 .CreateLogger();
 
             Log.Information("Starting Deriv cTrader Signal Scraper...");

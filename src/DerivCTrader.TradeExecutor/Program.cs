@@ -125,7 +125,9 @@ class Program
             .WriteTo.File(
                 Path.Combine(contentRoot, "logs", "tradeexecutor-.txt"),
                 rollingInterval: RollingInterval.Day,
-                retainedFileCountLimit: 30)
+                retainedFileCountLimit: 1,
+                fileSizeLimitBytes: 52428800, // 50MB limit
+                rollOnFileSizeLimit: true)
             .CreateLogger();
 
         try
