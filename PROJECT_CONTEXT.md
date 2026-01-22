@@ -1,6 +1,6 @@
 # DerivCTrader Automation - Project Context
 
-**Last Updated:** 2026-01-21
+**Last Updated:** 2026-01-22
 
 This document is maintained by AI assistants to provide continuity across sessions when context windows fill up.
 
@@ -18,6 +18,49 @@ The project is a **trading automation system** that:
 7. **NEW:** Deriv WebSocket connection resilience with auto-restart
 
 ### Recent Major Changes (Dec 2025 - Jan 2026)
+
+#### Identified Jan 22, 2026 - Corrupt Asset Names Data Quality Issue
+
+**Summary:** Found corrupt Asset data where direction was appended to asset name, causing cTrader symbol lookup failures.
+
+**Problem:**
+- cTrader symbol lookup failing for synthetic indices:
+  ```
+  Failed to get symbol ID for CRASH 500 Buy
+  Failed to get symbol ID for Volatility 30 1s Buy
+  ```
+- Asset column contains both symbol AND direction: "CRASH 500 Buy" instead of just "CRASH 500"
+- Direction should be in separate `Direction` column, not appended to `Asset`
+
+**Affected Tables:**
+1. `ParsedSignalsQueue` - Parsed signals with " Buy" or " Sell" appended to Asset
+2. `TradeExecutionQueue` - cTrader orders with corrupt Asset names
+
+**Root Cause:**
+- Old corrupt data in database from previous parser version or manual inserts
+- Current [SyntheticIndicesParser.cs](src/DerivCTrader.Application/Parsers/SyntheticIndicesParser.cs) correctly separates Asset and Direction
+- No code changes needed - parsers are working correctly
+
+**Fix Provided:**
+Created SQL scripts to clean up existing corrupt data:
+- [fix-corrupt-asset-names.sql](fix-corrupt-asset-names.sql) - Fixes ParsedSignalsQueue table
+- [fix-corrupt-asset-names-queue.sql](fix-corrupt-asset-names-queue.sql) - Fixes TradeExecutionQueue table
+
+**What the scripts do:**
+1. Identify records where Asset ends with " Buy" or " Sell"
+2. Remove the suffix: "CRASH 500 Buy" → "CRASH 500"
+3. Verify all records are fixed (count should be 0)
+4. Show sample of fixed records
+
+**Action Required by User:**
+1. Run [fix-corrupt-asset-names.sql](fix-corrupt-asset-names.sql) in SSMS
+2. Run [fix-corrupt-asset-names-queue.sql](fix-corrupt-asset-names-queue.sql) in SSMS
+3. Monitor logs to verify no more "Unknown symbol" errors for synthetic indices
+
+**Impact After Fix:**
+- cTrader symbol lookups will succeed
+- Synthetic indices orders will be created correctly
+- No more "Failed to get symbol ID" errors
 
 #### Completed Jan 21, 2026 - Fixed Dasha Trade Dependency Injection Bug
 
